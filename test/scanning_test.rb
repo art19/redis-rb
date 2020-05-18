@@ -1,6 +1,7 @@
+# frozen_string_literal: true
 require_relative "helper"
 
-class TestScanning < Test::Unit::TestCase
+class TestScanning < Minitest::Test
 
   include Helper::Client
 

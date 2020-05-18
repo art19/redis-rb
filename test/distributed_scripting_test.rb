@@ -1,6 +1,7 @@
+# frozen_string_literal: true
 require_relative "helper"
 
-class TestDistributedScripting < Test::Unit::TestCase
+class TestDistributedScripting < Minitest::Test
 
   include Helper::Distributed
 

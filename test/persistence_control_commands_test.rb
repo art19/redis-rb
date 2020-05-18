@@ -1,6 +1,7 @@
+# frozen_string_literal: true
 require_relative "helper"
 
-class TestPersistenceControlCommands < Test::Unit::TestCase
+class TestPersistenceControlCommands < Minitest::Test
 
   include Helper::Client
 

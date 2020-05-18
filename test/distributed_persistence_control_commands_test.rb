@@ -1,6 +1,7 @@
+# frozen_string_literal: true
 require_relative "helper"
 
-class TestDistributedPersistenceControlCommands < Test::Unit::TestCase
+class TestDistributedPersistenceControlCommands < Minitest::Test
 
   include Helper::Distributed
 

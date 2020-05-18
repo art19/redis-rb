@@ -1,7 +1,8 @@
+# frozen_string_literal: true
 require_relative "helper"
 require_relative "lint/value_types"
 
-class TestCommandsOnValueTypes < Test::Unit::TestCase
+class TestCommandsOnValueTypes < Minitest::Test
 
   include Helper::Client
   include Lint::ValueTypes
@@ -38,6 +39,42 @@ class TestCommandsOnValueTypes < Test::Unit::TestCase
     assert_equal [], r.keys("*").sort
   end
 
+  def test_unlink
+    target_version "4.0.0" do
+      r.set "foo", "s1"
+      r.set "bar", "s2"
+      r.set "baz", "s3"
+
+      assert_equal ["bar", "baz", "foo"], r.keys("*").sort
+
+      assert_equal 1, r.unlink("foo")
+
+      assert_equal ["bar", "baz"], r.keys("*").sort
+
+      assert_equal 2, r.unlink("bar", "baz")
+
+      assert_equal [], r.keys("*").sort
+    end
+  end
+
+  def test_unlink_with_array_argument
+    target_version "4.0.0" do
+      r.set "foo", "s1"
+      r.set "bar", "s2"
+      r.set "baz", "s3"
+
+      assert_equal ["bar", "baz", "foo"], r.keys("*").sort
+
+      assert_equal 1, r.unlink(["foo"])
+
+      assert_equal ["bar", "baz"], r.keys("*").sort
+
+      assert_equal 2, r.unlink(["bar", "baz"])
+
+      assert_equal [], r.keys("*").sort
+    end
+  end
+
   def test_randomkey
     assert r.randomkey.to_s.empty?
 
@@ -57,7 +94,7 @@ class TestCommandsOnValueTypes < Test::Unit::TestCase
     r.rename "foo", "bar"
 
     assert_equal "s1", r.get("bar")
-    assert_equal nil, r.get("foo")
+    assert_nil r.get("foo")
   end
 
   def test_renamenx
@@ -139,12 +176,12 @@ class TestCommandsOnValueTypes < Test::Unit::TestCase
     redis_mock(:migrate => lambda { |*args| args }) do |redis|
       options = { :host => "127.0.0.1", :port => 1234 }
 
-      ex = assert_raise(RuntimeError) do
+      ex = assert_raises(RuntimeError) do
         redis.migrate("foo", options.reject { |key, _| key == :host })
       end
       assert ex.message =~ /host not specified/
 
-      ex = assert_raise(RuntimeError) do
+      ex = assert_raises(RuntimeError) do
         redis.migrate("foo", options.reject { |key, _| key == :port })
       end
       assert ex.message =~ /port not specified/
@@ -165,6 +202,21 @@ class TestCommandsOnValueTypes < Test::Unit::TestCase
       # Test timeout override
       actual = redis.migrate("foo", options.merge(:timeout => default_timeout + 1))
       expected = ["127.0.0.1", "1234", "foo", default_db.to_s, (default_timeout + 1).to_s]
+      assert_equal expected, actual
+
+      # Test copy override
+      actual = redis.migrate('foo', options.merge(copy: true))
+      expected = ['127.0.0.1', '1234', 'foo', default_db.to_s, default_timeout.to_s, 'COPY']
+      assert_equal expected, actual
+
+      # Test replace override
+      actual = redis.migrate('foo', options.merge(replace: true))
+      expected = ['127.0.0.1', '1234', 'foo', default_db.to_s, default_timeout.to_s, 'REPLACE']
+      assert_equal expected, actual
+
+      # Test multiple keys
+      actual = redis.migrate(%w[foo bar baz], options)
+      expected = ['127.0.0.1', '1234', '', default_db.to_s, default_timeout.to_s, 'KEYS', 'foo', 'bar', 'baz']
       assert_equal expected, actual
     end
   end

@@ -1,6 +1,7 @@
+# frozen_string_literal: true
 require_relative "helper"
 
-class TestClient < Test::Unit::TestCase
+class TestClient < Minitest::Test
 
   include Helper::Client
 
@@ -37,7 +38,7 @@ class TestClient < Test::Unit::TestCase
     r.queue("SET", "foo", "bar")
     r.queue("INCR")
 
-    assert_raise(Redis::CommandError) do
+    assert_raises(Redis::CommandError) do
       r.commit
     end
   end
@@ -46,7 +47,7 @@ class TestClient < Test::Unit::TestCase
     r.queue("SET", "foo", "bar")
     r.queue("INCR")
 
-    assert_raise(Redis::CommandError) do
+    assert_raises(Redis::CommandError) do
       r.commit
     end
 
@@ -55,5 +56,21 @@ class TestClient < Test::Unit::TestCase
     result = r.commit
 
     assert_equal result, ["OK", 1]
+  end
+
+  def test_client_with_custom_connector
+    custom_connector = Class.new(Redis::Client::Connector) do
+      def resolve
+        @options[:host] = '127.0.0.5'
+        @options[:port] = '999'
+        @options
+      end
+    end
+
+    error = assert_raises do
+      new_redis = _new_client(connector: custom_connector)
+      new_redis.ping
+    end
+    assert_equal 'Error connecting to Redis on 127.0.0.5:999 (Errno::ECONNREFUSED)', error.message
   end
 end

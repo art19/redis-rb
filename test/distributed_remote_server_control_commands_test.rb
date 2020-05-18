@@ -1,6 +1,7 @@
+# frozen_string_literal: true
 require_relative "helper"
 
-class TestDistributedRemoteServerControlCommands < Test::Unit::TestCase
+class TestDistributedRemoteServerControlCommands < Minitest::Test
 
   include Helper::Distributed
 
@@ -27,11 +28,13 @@ class TestDistributedRemoteServerControlCommands < Test::Unit::TestCase
 
   def test_info_commandstats
     target_version "2.5.7" do
-      r.nodes.each { |n| n.config(:resetstat) }
-      r.ping # Executed on every node
+      r.nodes.each do |n|
+        n.config(:resetstat)
+        n.config(:get, :port)
+      end
 
       r.info(:commandstats).each do |info|
-        assert_equal "1", info["ping"]["calls"]
+        assert_equal '2', info['config']['calls'] # CONFIG RESETSTAT + CONFIG GET = twice
       end
     end
   end

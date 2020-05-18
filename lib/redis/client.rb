@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 require_relative "errors"
 require "socket"
 require "cgi"
@@ -18,6 +20,8 @@ class Redis
       :id => nil,
       :tcp_keepalive => 0,
       :reconnect_attempts => 1,
+      :reconnect_delay => 0,
+      :reconnect_delay_max => 0.5,
       :inherit_socket => false
     }
 
@@ -84,11 +88,14 @@ class Redis
 
       @pending_reads = 0
 
-      if options.include?(:sentinels)
-        @connector = Connector::Sentinel.new(@options)
-      else
-        @connector = Connector.new(@options)
-      end
+      @connector =
+        if options.include?(:sentinels)
+          Connector::Sentinel.new(@options)
+        elsif options.include?(:connector) && options[:connector].respond_to?(:new)
+          options.delete(:connector).new(@options)
+        else
+          Connector.new(@options)
+        end
     end
 
     def connect
@@ -150,9 +157,11 @@ class Redis
     end
 
     def call_pipeline(pipeline)
+      return [] if pipeline.futures.empty?
+
       with_reconnect pipeline.with_reconnect? do
         begin
-          pipeline.finish(call_pipelined(pipeline.commands)).tap do
+          pipeline.finish(call_pipelined(pipeline)).tap do
             self.db = pipeline.db if pipeline.db
           end
         rescue ConnectionError => e
@@ -165,8 +174,8 @@ class Redis
       end
     end
 
-    def call_pipelined(commands)
-      return [] if commands.empty?
+    def call_pipelined(pipeline)
+      return [] if pipeline.futures.empty?
 
       # The method #ensure_connected (called from #process) reconnects once on
       # I/O errors. To make an effort in making sure that commands are not
@@ -176,6 +185,8 @@ class Redis
       # already successfully executed commands. To circumvent this, don't retry
       # after the first reply has been read successfully.
 
+      commands = pipeline.commands
+
       result = Array.new(commands.size)
       reconnect = @reconnect
 
@@ -183,13 +194,14 @@ class Redis
         exception = nil
 
         process(commands) do
-          result[0] = read
-
-          @reconnect = false
-
-          (commands.size - 1).times do |i|
-            reply = read
-            result[i + 1] = reply
+          pipeline.timeouts.each_with_index do |timeout, i|
+            reply = if timeout
+              with_socket_timeout(timeout) { read }
+            else
+              read
+            end
+            result[i] = reply
+            @reconnect = false
             exception = reply if exception.nil? && reply.is_a?(CommandError)
           end
         end
@@ -238,6 +250,7 @@ class Redis
     def disconnect
       connection.disconnect if connected?
     end
+    alias_method :close, :disconnect
 
     def reconnect
       disconnect
@@ -272,12 +285,15 @@ class Redis
 
     def with_socket_timeout(timeout)
       connect unless connected?
+      original = @options[:read_timeout]
 
       begin
         connection.timeout = timeout
+        @options[:read_timeout] = timeout # for reconnection
         yield
       ensure
         connection.timeout = self.timeout if connected?
+        @options[:read_timeout] = original
       end
     end
 
@@ -334,12 +350,15 @@ class Redis
       @connection = @options[:driver].connect(@options)
       @pending_reads = 0
     rescue TimeoutError,
+           SocketError,
+           Errno::EADDRNOTAVAIL,
            Errno::ECONNREFUSED,
            Errno::EHOSTDOWN,
            Errno::EHOSTUNREACH,
            Errno::ENETUNREACH,
            Errno::ENOENT,
-           Errno::ETIMEDOUT
+           Errno::ETIMEDOUT,
+           Errno::EINVAL
 
       raise CannotConnectError, "Error connecting to Redis on #{location} (#{$!.class})"
     end
@@ -368,6 +387,10 @@ class Redis
         disconnect
 
         if attempts <= @options[:reconnect_attempts] && @reconnect
+          sleep_t = [(@options[:reconnect_delay] * 2**(attempts-1)),
+                     @options[:reconnect_delay_max]].min
+
+          Kernel.sleep(sleep_t)
           retry
         else
           raise
@@ -394,7 +417,8 @@ class Redis
         options[key] = options[key.to_s] if options.has_key?(key.to_s)
       end
 
-      url = options[:url] || defaults[:url]
+      url = options[:url]
+      url = defaults[:url] if url == nil
 
       # Override defaults from URL if given
       if url
@@ -445,6 +469,8 @@ class Redis
       options[:write_timeout]   = Float(options[:write_timeout])
 
       options[:reconnect_attempts] = options[:reconnect_attempts].to_i
+      options[:reconnect_delay] = options[:reconnect_delay].to_f
+      options[:reconnect_delay_max] = options[:reconnect_delay_max].to_f
 
       options[:db] = options[:db].to_i
       options[:driver] = _parse_driver(options[:driver]) || Connection.drivers.last
@@ -510,7 +536,6 @@ class Redis
         def initialize(options)
           super(options)
 
-          @options[:password] = DEFAULTS.fetch(:password)
           @options[:db] = DEFAULTS.fetch(:db)
 
           @sentinels = @options.delete(:sentinels).dup
@@ -553,6 +578,7 @@ class Redis
             client = Client.new(@options.merge({
               :host => sentinel[:host],
               :port => sentinel[:port],
+              password: sentinel[:password],
               :reconnect_attempts => 0,
             }))
 
@@ -584,9 +610,19 @@ class Redis
         def resolve_slave
           sentinel_detect do |client|
             if reply = client.call(["sentinel", "slaves", @master])
-              slave = Hash[*reply.sample]
+              slaves = reply.map { |s| s.each_slice(2).to_h }
+              slaves.each { |s| s['flags'] = s.fetch('flags').split(',') }
+              slaves.reject! { |s| s.fetch('flags').include?('s_down') }
 
-              {:host => slave.fetch("ip"), :port => slave.fetch("port")}
+              if slaves.empty?
+                raise CannotConnectError, 'No slaves available.'
+              else
+                slave = slaves.sample
+                {
+                  host: slave.fetch('ip'),
+                  port: slave.fetch('port'),
+                }
+              end
             end
           end
         end

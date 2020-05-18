@@ -1,6 +1,7 @@
+# frozen_string_literal: true
 require_relative "helper"
 
-class TestThreadSafety < Test::Unit::TestCase
+class TestThreadSafety < Minitest::Test
 
   include Helper::Client
 

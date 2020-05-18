@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require "./lib/redis/version"
 
 Gem::Specification.new do |s|
@@ -30,13 +31,12 @@ Gem::Specification.new do |s|
 
   s.email = ["redis-db@googlegroups.com"]
 
-  s.files         = `git ls-files`.split("\n")
-  s.test_files    = `git ls-files -- {test,spec,features}/*`.split("\n")
-  s.executables   = `git ls-files -- bin/*`.split("\n").map{ |f| File.basename(f) }
+  s.files         = Dir["CHANGELOG.md", "LICENSE", "README.md", "lib/**/*"]
+  s.executables   = `git ls-files -- exe/*`.split("\n").map{ |f| File.basename(f) }
 
-  s.required_ruby_version = '>= 2.2.2'
+  s.required_ruby_version = '>= 2.3.0'
 
-  s.add_development_dependency("test-unit", ">= 3.1.5")
+  s.add_development_dependency("mocha")
   s.add_development_dependency("hiredis")
   s.add_development_dependency("em-synchrony")
 end

@@ -1,6 +1,7 @@
+# frozen_string_literal: true
 require_relative "helper"
 
-class TestPublishSubscribe < Test::Unit::TestCase
+class TestPublishSubscribe < Minitest::Test
 
   include Helper::Client
 
@@ -119,6 +120,7 @@ class TestPublishSubscribe < Test::Unit::TestCase
       Wire.pass while !@subscribed
       redis = Redis.new(OPTIONS)
       channels_result = redis.pubsub(:channels)
+      channels_result.delete('__sentinel__:hello')
       numsub_result   = redis.pubsub(:numsub, 'foo', 'boo')
 
       redis.publish("foo", "s1")
@@ -205,7 +207,7 @@ class TestPublishSubscribe < Test::Unit::TestCase
   end
 
   def test_other_commands_within_a_subscribe
-    assert_raise Redis::CommandError do
+    assert_raises Redis::CommandError do
       r.subscribe("foo") do |on|
         on.subscribe do |channel, total|
           r.set("bar", "s2")
@@ -215,32 +217,32 @@ class TestPublishSubscribe < Test::Unit::TestCase
   end
 
   def test_subscribe_without_a_block
-    assert_raise LocalJumpError do
+    assert_raises LocalJumpError do
       r.subscribe("foo")
     end
   end
 
   def test_unsubscribe_without_a_subscribe
-    assert_raise RuntimeError do
+    assert_raises RuntimeError do
       r.unsubscribe
     end
 
-    assert_raise RuntimeError do
+    assert_raises RuntimeError do
       r.punsubscribe
     end
   end
 
   def test_subscribe_past_a_timeout
     # For some reason, a thread here doesn't reproduce the issue.
-    sleep = %{sleep #{OPTIONS[:timeout] * 2}}
+    sleep = %(sleep 0.05)
     publish = %{ruby -rsocket -e 't=TCPSocket.new("127.0.0.1",#{OPTIONS[:port]});t.write("publish foo bar\\r\\n");t.read(4);t.close'}
-    cmd = [sleep, publish].join("; ")
+    cmd = [sleep, publish].join('; ')
 
-    IO.popen(cmd, "r+") do |pipe|
+    IO.popen(cmd, 'r+') do |_pipe|
       received = false
 
-      r.subscribe "foo" do |on|
-        on.message do |channel, message|
+      r.subscribe 'foo' do |on|
+        on.message do |_channel, _message|
           received = true
           r.unsubscribe
         end
@@ -253,8 +255,8 @@ class TestPublishSubscribe < Test::Unit::TestCase
   def test_subscribe_with_timeout
     received = false
 
-    assert_raise Redis::TimeoutError do
-      r.subscribe_with_timeout(1, "foo")  do |on|
+    assert_raises Redis::TimeoutError do
+      r.subscribe_with_timeout(LOW_TIMEOUT, "foo")  do |on|
         on.message do |channel, message|
           received = true
         end
@@ -267,8 +269,8 @@ class TestPublishSubscribe < Test::Unit::TestCase
   def test_psubscribe_with_timeout
     received = false
 
-    assert_raise Redis::TimeoutError do
-      r.psubscribe_with_timeout(1, "f*")  do |on|
+    assert_raises Redis::TimeoutError do
+      r.psubscribe_with_timeout(LOW_TIMEOUT, "f*")  do |on|
         on.message do |channel, message|
           received = true
         end

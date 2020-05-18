@@ -1,6 +1,7 @@
+# frozen_string_literal: true
 require_relative "helper"
 
-class TestRemoteServerControlCommands < Test::Unit::TestCase
+class TestRemoteServerControlCommands < Minitest::Test
 
   include Helper::Client
 
@@ -26,10 +27,10 @@ class TestRemoteServerControlCommands < Test::Unit::TestCase
   def test_info_commandstats
     target_version "2.5.7" do
       r.config(:resetstat)
-      r.ping
+      r.config(:get, :port)
 
       result = r.info(:commandstats)
-      assert_equal "1", result["ping"]["calls"]
+      assert_equal '2', result['config']['calls']
     end
   end
 
@@ -160,13 +161,13 @@ class TestRemoteServerControlCommands < Test::Unit::TestCase
 
     clients = r.client(:list)
     i = clients.index {|client| client['name'] == 'redis-rb'}
-    assert_equal nil, i
+    assert_nil i
   end
 
   def test_client_getname_and_setname
     return if version < "2.6.9"
 
-    assert_equal nil, r.client(:getname)
+    assert_nil r.client(:getname)
 
     r.client(:setname, 'redis-rb')
     name = r.client(:getname)

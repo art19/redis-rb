@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require_relative "hash_ring"
 
 class Redis
@@ -158,6 +159,14 @@ class Redis
       keys_per_node = args.group_by { |key| node_for(key) }
       keys_per_node.inject(0) do |sum, (node, keys)|
         sum + node.del(*keys)
+      end
+    end
+
+    # Unlink keys.
+    def unlink(*args)
+      keys_per_node = args.group_by { |key| node_for(key) }
+      keys_per_node.inject(0) do |sum, (node, keys)|
+        sum + node.unlink(*keys)
       end
     end
 
@@ -393,14 +402,12 @@ class Redis
     end
 
     def _bpop(cmd, args)
-      options = {}
-
-      case args.last
-      when Hash
+      timeout = if args.last.is_a?(Hash)
         options = args.pop
-      when Integer
+        options[:timeout]
+      elsif args.last.respond_to?(:to_int)
         # Issue deprecation notice in obnoxious mode...
-        options[:timeout] = args.pop
+        args.pop.to_int
       end
 
       if args.size > 1
@@ -410,7 +417,11 @@ class Redis
       keys = args.flatten
 
       ensure_same_node(cmd, keys) do |node|
-        node.__send__(cmd, keys, options)
+        if timeout
+          node.__send__(cmd, keys, timeout: timeout)
+        else
+          node.__send__(cmd, keys)
+        end
       end
     end
 
@@ -692,8 +703,8 @@ class Redis
     end
 
     # Delete one or more hash fields.
-    def hdel(key, field)
-      node_for(key).hdel(key, field)
+    def hdel(key, *fields)
+      node_for(key).hdel(key, *fields)
     end
 
     # Determine if a hash field exists.

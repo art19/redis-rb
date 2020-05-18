@@ -1,13 +1,20 @@
+# frozen_string_literal: true
 class Redis
   class Pipeline
     attr_accessor :db
+    attr_reader :client
 
     attr :futures
 
-    def initialize
+    def initialize(client)
+      @client = client.is_a?(Pipeline) ? client.client : client
       @with_reconnect = true
       @shutdown = false
       @futures = []
+    end
+
+    def timeout
+      client.timeout
     end
 
     def with_reconnect?
@@ -22,13 +29,21 @@ class Redis
       @shutdown
     end
 
-    def call(command, &block)
+    def empty?
+      @futures.empty?
+    end
+
+    def call(command, timeout: nil, &block)
       # A pipeline that contains a shutdown should not raise ECONNRESET when
       # the connection is gone.
       @shutdown = true if command.first == :shutdown
-      future = Future.new(command, block)
+      future = Future.new(command, block, timeout)
       @futures << future
       future
+    end
+
+    def call_with_timeout(command, timeout, &block)
+      call(command, timeout: timeout, &block)
     end
 
     def call_pipeline(pipeline)
@@ -39,7 +54,11 @@ class Redis
     end
 
     def commands
-      @futures.map { |f| f._command }
+      @futures.map(&:_command)
+    end
+
+    def timeouts
+      @futures.map(&:timeout)
     end
 
     def with_reconnect(val=true)
@@ -85,8 +104,20 @@ class Redis
         end
       end
 
+      def timeouts
+        if empty?
+          []
+        else
+          [nil, *super, nil]
+        end
+      end
+
       def commands
-        [[:multi]] + super + [[:exec]]
+        if empty?
+          []
+        else
+          [[:multi]] + super + [[:exec]]
+        end
       end
     end
   end
@@ -100,10 +131,27 @@ class Redis
   class Future < BasicObject
     FutureNotReady = ::Redis::FutureNotReady.new
 
-    def initialize(command, transformation)
+    attr_reader :timeout
+
+    def initialize(command, transformation, timeout)
       @command = command
       @transformation = transformation
+      @timeout = timeout
       @object = FutureNotReady
+    end
+
+    def ==(_other)
+      message = +"The methods == and != are deprecated for Redis::Future and will be removed in 4.2.0"
+      message << " - You probably meant to call .value == or .value !="
+      message << " (#{::Kernel.caller(1, 1).first})\n"
+
+      if defined?(::Warning)
+        ::Warning.warn(message)
+      else
+        $stderr.puts(message)
+      end
+
+      super
     end
 
     def inspect

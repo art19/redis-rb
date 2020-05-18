@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require_relative "registry"
 require_relative "command_helper"
 require_relative "../errors"
@@ -53,7 +54,7 @@ class Redis
         crlf = nil
 
         while (crlf = @buffer.index(CRLF)) == nil
-          @buffer << _read_from_socket(1024)
+          @buffer << _read_from_socket(16384)
         end
 
         @buffer.slice!(0, crlf + CRLF.bytesize)
@@ -262,12 +263,38 @@ class Redis
           tcp_sock = TCPSocket.connect(host, port, timeout)
 
           ctx = OpenSSL::SSL::SSLContext.new
-          ctx.set_params(ssl_params) if ssl_params && !ssl_params.empty?
+
+          # The provided parameters are merged into OpenSSL::SSL::SSLContext::DEFAULT_PARAMS
+          ctx.set_params(ssl_params || {})
 
           ssl_sock = new(tcp_sock, ctx)
           ssl_sock.hostname = host
-          ssl_sock.connect
-          ssl_sock.post_connection_check(host)
+
+          begin
+            # Initiate the socket connection in the background. If it doesn't fail
+            # immediately it will raise an IO::WaitWritable (Errno::EINPROGRESS)
+            # indicating the connection is in progress.
+            # Unlike waiting for a tcp socket to connect, you can't time out ssl socket
+            # connections during the connect phase properly, because IO.select only partially works.
+            # Instead, you have to retry.
+            ssl_sock.connect_nonblock
+          rescue Errno::EAGAIN, Errno::EWOULDBLOCK, IO::WaitReadable
+            if IO.select([ssl_sock], nil, nil, timeout)
+              retry
+            else
+              raise TimeoutError
+            end
+          rescue IO::WaitWritable
+            if IO.select(nil, [ssl_sock], nil, timeout)
+              retry
+            else
+              raise TimeoutError
+            end
+          end
+
+          unless ctx.verify_mode == OpenSSL::SSL::VERIFY_NONE || (ctx.respond_to?(:verify_hostname) && !ctx.verify_hostname)
+            ssl_sock.post_connection_check(host)
+          end
 
           ssl_sock
         end
@@ -294,9 +321,10 @@ class Redis
         end
 
         instance = new(sock)
-        instance.timeout = config[:timeout]
+        instance.timeout = config[:read_timeout]
         instance.write_timeout = config[:write_timeout]
         instance.set_tcp_keepalive config[:tcp_keepalive]
+        instance.set_tcp_nodelay if sock.is_a? TCPSocket
         instance
       end
 
@@ -324,6 +352,16 @@ class Redis
         def get_tcp_keepalive
           {
           }
+        end
+      end
+
+      # disables Nagle's Algorithm, prevents multiple round trips with MULTI
+      if [:IPPROTO_TCP, :TCP_NODELAY].all?{|c| Socket.const_defined? c}
+        def set_tcp_nodelay
+          @sock.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
+        end
+      else
+        def set_tcp_nodelay
         end
       end
 

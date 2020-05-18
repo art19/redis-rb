@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require "socket"
 
 module RedisMock
@@ -42,7 +43,7 @@ module RedisMock
           end
         end
       rescue => ex
-        $stderr.puts "Error running mock server: #{ex.message}"
+        $stderr.puts "Error running mock server: #{ex.class}: #{ex.message}"
         $stderr.puts ex.backtrace
         retry
       ensure

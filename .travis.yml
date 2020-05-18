@@ -1,14 +1,17 @@
 language: ruby
-
+cache:
+    directories:
+      - tmp/cache
 before_install:
-  - gem update --system 2.6.14
+  - gem update --system 3.0.3
   - gem --version
 
-script: make test
+script: make
 
 rvm:
-  - 2.6.2
+  - 2.6
   - 2.7.1
+  - jruby-9.1.17.0
   - jruby-9.1.15.0
   - rbx-3
 
@@ -22,53 +25,25 @@ before_script:
 env:
   global:
     - VERBOSE=true
-    - TIMEOUT=1
+    - TIMEOUT=30
+    - LOW_TIMEOUT=0.01
   matrix:
-    - DRIVER=ruby      REDIS_BRANCH=3.0
-    - DRIVER=ruby      REDIS_BRANCH=3.2
-    - DRIVER=hiredis   REDIS_BRANCH=3.0
-    - DRIVER=hiredis   REDIS_BRANCH=3.2
-    - DRIVER=synchrony REDIS_BRANCH=3.0
-    - DRIVER=synchrony REDIS_BRANCH=3.2
-    - DRIVER=ruby      REDIS_BRANCH=unstable
-
-branches:
-  only:
-    - staging
-    - trying
-    - master
+    - DRIVER=ruby      REDIS_BRANCH=5.0
+    - DRIVER=hiredis   REDIS_BRANCH=5.0
+    - DRIVER=synchrony REDIS_BRANCH=5.0
 
 matrix:
   exclude:
-    # hiredis
-    - rvm: jruby-9.1.15.0
-      gemfile: .travis/Gemfile
-      env: DRIVER=hiredis REDIS_BRANCH=3.0
-    - rvm: jruby-9.1.15.0
-      gemfile: .travis/Gemfile
-      env: DRIVER=hiredis REDIS_BRANCH=3.2
-    - rvm: jruby-9.1.15.0
-      gemfile: .travis/Gemfile
-      env: DRIVER=hiredis REDIS_BRANCH=3.0
-    - rvm: jruby-9.1.15.0
-      gemfile: .travis/Gemfile
-      env: DRIVER=hiredis REDIS_BRANCH=3.2
-
-    # synchrony
-    - rvm: jruby-9.1.15.0
-      gemfile: .travis/Gemfile
-      env: DRIVER=synchrony REDIS_BRANCH=3.0
-    - rvm: jruby-9.1.15.0
-      gemfile: .travis/Gemfile
-      env: DRIVER=synchrony REDIS_BRANCH=3.2
-    - rvm: jruby-9.1.15.0
-      gemfile: .travis/Gemfile
-      env: DRIVER=synchrony REDIS_BRANCH=3.0
-    - rvm: jruby-9.1.15.0
-      gemfile: .travis/Gemfile
-      env: DRIVER=synchrony REDIS_BRANCH=3.2
-  allow_failures:
-    - rvm: rbx-3
+    - rvm: jruby-9.1.17.0
+  include:
+    - rvm: jruby-9.1.17.0
+      env: DRIVER=ruby REDIS_BRANCH=5.0 LOW_TIMEOUT=0.3
+    - rvm: "2.3"
+      env: DRIVER=ruby REDIS_BRANCH=3.0
+    - rvm: "2.3"
+      env: DRIVER=ruby REDIS_BRANCH=3.2
+    - rvm: "2.3"
+      env: DRIVER=ruby REDIS_BRANCH=4.0
 
 notifications:
   irc:

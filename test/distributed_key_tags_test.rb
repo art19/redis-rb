@@ -1,6 +1,7 @@
+# frozen_string_literal: true
 require_relative "helper"
 
-class TestDistributedKeyTags < Test::Unit::TestCase
+class TestDistributedKeyTags < Minitest::Test
 
   include Helper
   include Helper::Distributed

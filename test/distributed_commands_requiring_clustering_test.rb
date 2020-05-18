@@ -1,6 +1,7 @@
+# frozen_string_literal: true
 require_relative "helper"
 
-class TestDistributedCommandsRequiringClustering < Test::Unit::TestCase
+class TestDistributedCommandsRequiringClustering < Minitest::Test
 
   include Helper::Distributed
 
@@ -9,7 +10,7 @@ class TestDistributedCommandsRequiringClustering < Test::Unit::TestCase
     r.rename "{qux}foo", "{qux}bar"
 
     assert_equal "s1", r.get("{qux}bar")
-    assert_equal nil, r.get("{qux}foo")
+    assert_nil r.get("{qux}foo")
   end
 
   def test_renamenx
