@@ -1,8 +1,7 @@
-# encoding: UTF-8
+# frozen_string_literal: true
+require_relative "helper"
 
-require File.expand_path("helper", File.dirname(__FILE__))
-
-class TestScripting < Test::Unit::TestCase
+class TestScripting < Minitest::Test
 
   include Helper::Client
 

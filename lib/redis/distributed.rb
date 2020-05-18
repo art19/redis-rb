@@ -1,4 +1,5 @@
-require "redis/hash_ring"
+# frozen_string_literal: true
+require_relative "hash_ring"
 
 class Redis
   class Distributed
@@ -144,8 +145,8 @@ class Redis
     end
 
     # Create a key using the serialized value, previously obtained using DUMP.
-    def restore(key, ttl, serialized_value)
-      node_for(key).restore(key, ttl, serialized_value)
+    def restore(key, ttl, serialized_value, options = {})
+      node_for(key).restore(key, ttl, serialized_value, options)
     end
 
     # Transfer a key from the connected instance to another instance.
@@ -158,6 +159,14 @@ class Redis
       keys_per_node = args.group_by { |key| node_for(key) }
       keys_per_node.inject(0) do |sum, (node, keys)|
         sum + node.del(*keys)
+      end
+    end
+
+    # Unlink keys.
+    def unlink(*args)
+      keys_per_node = args.group_by { |key| node_for(key) }
+      keys_per_node.inject(0) do |sum, (node, keys)|
+        sum + node.unlink(*keys)
       end
     end
 
@@ -277,13 +286,16 @@ class Redis
       node_for(key).get(key)
     end
 
-    # Get the values of all the given keys.
+    # Get the values of all the given keys as an Array.
     def mget(*keys)
-      raise CannotDistribute, :mget
+      mapped_mget(*keys).values_at(*keys)
     end
 
+    # Get the values of all the given keys as a Hash.
     def mapped_mget(*keys)
-      raise CannotDistribute, :mapped_mget
+      keys.group_by { |k| node_for k }.inject({}) do |results, (node, subkeys)|
+        results.merge! node.mapped_mget(*subkeys)
+      end
     end
 
     # Overwrite part of a string at key starting at the specified offset.
@@ -390,14 +402,12 @@ class Redis
     end
 
     def _bpop(cmd, args)
-      options = {}
-
-      case args.last
-      when Hash
+      timeout = if args.last.is_a?(Hash)
         options = args.pop
-      when Integer
+        options[:timeout]
+      elsif args.last.respond_to?(:to_int)
         # Issue deprecation notice in obnoxious mode...
-        options[:timeout] = args.pop
+        args.pop.to_int
       end
 
       if args.size > 1
@@ -407,7 +417,11 @@ class Redis
       keys = args.flatten
 
       ensure_same_node(cmd, keys) do |node|
-        node.__send__(cmd, keys, options)
+        if timeout
+          node.__send__(cmd, keys, timeout: timeout)
+        else
+          node.__send__(cmd, keys)
+        end
       end
     end
 
@@ -507,6 +521,16 @@ class Redis
     # Get all the members in a set.
     def smembers(key)
       node_for(key).smembers(key)
+    end
+
+    # Scan a set
+    def sscan(key, cursor, options={})
+      node_for(key).sscan(key, cursor, options)
+    end
+
+    # Scan a set and return an enumerator
+    def sscan_each(key, options={}, &block)
+      node_for(key).sscan_each(key, options, &block)
     end
 
     # Subtract multiple sets.
@@ -679,8 +703,8 @@ class Redis
     end
 
     # Delete one or more hash fields.
-    def hdel(key, field)
-      node_for(key).hdel(key, field)
+    def hdel(key, *fields)
+      node_for(key).hdel(key, *fields)
     end
 
     # Determine if a hash field exists.

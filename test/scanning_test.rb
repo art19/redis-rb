@@ -1,12 +1,7 @@
-# encoding: UTF-8
+# frozen_string_literal: true
+require_relative "helper"
 
-require File.expand_path("helper", File.dirname(__FILE__))
-
-unless defined?(Enumerator)
-  Enumerator = Enumerable::Enumerator
-end
-
-class TestScanning < Test::Unit::TestCase
+class TestScanning < Minitest::Test
 
   include Helper::Client
 

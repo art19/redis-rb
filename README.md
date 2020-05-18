@@ -1,45 +1,17 @@
-# redis-rb [![Build Status][travis-image]][travis-link] [![Inline docs][inchpages-image]][inchpages-link]
+# redis-rb [![Build Status][travis-image]][travis-link] [![Inline docs][inchpages-image]][inchpages-link] ![](https://github.com/redis/redis-rb/workflows/Test/badge.svg?branch=master)
 
-[travis-image]: https://secure.travis-ci.org/redis/redis-rb.svg?branch=master
-[travis-link]: http://travis-ci.org/redis/redis-rb
-[travis-home]: http://travis-ci.org/
-[inchpages-image]: http://inch-ci.org/github/redis/redis-rb.svg
-[inchpages-link]: http://inch-ci.org/github/redis/redis-rb
+A Ruby client that tries to match [Redis][redis-home]' API one-to-one, while still
+providing an idiomatic interface.
 
-A Ruby client library for [Redis][redis-home].
-
-[redis-home]: http://redis.io
-
-A Ruby client that tries to match Redis' API one-to-one, while still
-providing an idiomatic interface. It features thread-safety, client-side
-sharding, pipelining, and an obsession for performance.
-
-## Upgrading from 2.x to 3.0
-
-Please refer to the [CHANGELOG][changelog-3.0.0] for a summary of the
-most important changes, as well as a full list of changes.
-
-[changelog-3.0.0]: https://github.com/redis/redis-rb/blob/master/CHANGELOG.md#300
+See [RubyDoc.info][rubydoc] for the API docs of the latest published gem.
 
 ## Getting started
 
-To install **redis-rb**, run the following command:
+Install with:
 
 ```
-  gem install redis
+$ gem install redis
 ```
-
-Or if you are using **bundler**, add
-
-```
-  gem 'redis', '~>3.2'
-```
-
-to your `Gemfile`, and run `bundle install`
-
-As of version 2.0 this client only targets Redis version 2.0 and higher.
-You can use an older version of this client if you need to interface
-with a Redis instance older than 2.0, but this is no longer supported.
 
 You can connect to Redis by instantiating the `Redis` class:
 
@@ -54,16 +26,17 @@ listening on `localhost`, port 6379. If you need to connect to a remote
 server or a different port, try:
 
 ```ruby
-redis = Redis.new(:host => "10.0.1.1", :port => 6380, :db => 15)
+redis = Redis.new(host: "10.0.1.1", port: 6380, db: 15)
 ```
 
 You can also specify connection options as a [`redis://` URL][redis-url]:
 
 ```ruby
-redis = Redis.new(:url => "redis://:p4ssw0rd@10.0.1.1:6380/15")
+redis = Redis.new(url: "redis://:p4ssw0rd@10.0.1.1:6380/15")
 ```
 
-[redis-url]: http://www.iana.org/assignments/uri-schemes/prov/redis
+The client expects passwords with special chracters to be URL-encoded (i.e.
+`CGI.escape(password)`).
 
 By default, the client will try to read the `REDIS_URL` environment variable
 and use that as URL to connect to. The above statement is therefore equivalent
@@ -72,21 +45,19 @@ to setting this environment variable and calling `Redis.new` without arguments.
 To connect to Redis listening on a Unix socket, try:
 
 ```ruby
-redis = Redis.new(:path => "/tmp/redis.sock")
+redis = Redis.new(path: "/tmp/redis.sock")
 ```
 
 To connect to a password protected Redis instance, use:
 
 ```ruby
-redis = Redis.new(:password => "mysecret")
+redis = Redis.new(password: "mysecret")
 ```
 
 The Redis class exports methods that are named identical to the commands
 they execute. The arguments these methods accept are often identical to
 the arguments specified on the [Redis website][redis-commands]. For
 instance, the `SET` and `GET` commands can be called like this:
-
-[redis-commands]: http://redis.io/commands
 
 ```ruby
 redis.set("mykey", "hello world")
@@ -96,24 +67,22 @@ redis.get("mykey")
 # => "hello world"
 ```
 
-All commands, their arguments and return values are documented, and
-available on [rdoc.info][rdoc].
-
-[rdoc]: http://rdoc.info/github/redis/redis-rb/
+All commands, their arguments, and return values are documented and
+available on [RubyDoc.info][rubydoc].
 
 ## Sentinel support
 
-The client is able to perform automatic failovers by using [Redis
+The client is able to perform automatic failover by using [Redis
 Sentinel](http://redis.io/topics/sentinel).  Make sure to run Redis 2.8+
 if you want to use this feature.
 
 To connect using Sentinel, use:
 
 ```ruby
-SENTINELS = [{:host => "127.0.0.1", :port => 26380},
-             {:host => "127.0.0.1", :port => 26381}]
+SENTINELS = [{ host: "127.0.0.1", port: 26380 },
+             { host: "127.0.0.1", port: 26381 }]
 
-redis = Redis.new(:url => "redis://mymaster", :sentinels => SENTINELS, :role => :master)
+redis = Redis.new(url: "redis://mymaster", sentinels: SENTINELS, role: :master)
 ```
 
 * The master name identifies a group of Redis instances composed of a master
@@ -130,10 +99,60 @@ but a few so that if one is down the client will try the next one. The client
 is able to remember the last Sentinel that was able to reply correctly and will
 use it for the next requests.
 
+If you want to [authenticate](https://redis.io/topics/sentinel#configuring-sentinel-instances-with-authentication) Sentinel itself, you must specify the `password` option per instance.
+
+```ruby
+SENTINELS = [{ host: '127.0.0.1', port: 26380, password: 'mysecret' },
+             { host: '127.0.0.1', port: 26381, password: 'mysecret' }]
+
+redis = Redis.new(host: 'mymaster', sentinels: SENTINELS, role: :master)
+```
+
+## Cluster support
+
+`redis-rb` supports [clustering](https://redis.io/topics/cluster-spec).
+
+```ruby
+# Nodes can be passed to the client as an array of connection URLs.
+nodes = (7000..7005).map { |port| "redis://127.0.0.1:#{port}" }
+redis = Redis.new(cluster: nodes)
+
+# You can also specify the options as a Hash. The options are the same as for a single server connection.
+(7000..7005).map { |port| { host: '127.0.0.1', port: port } }
+```
+
+You can also specify only a subset of the nodes, and the client will discover the missing ones using the [CLUSTER NODES](https://redis.io/commands/cluster-nodes) command.
+
+```ruby
+Redis.new(cluster: %w[redis://127.0.0.1:7000])
+```
+
+If you want [the connection to be able to read from any replica](https://redis.io/commands/readonly), you must pass the `replica: true`. Note that this connection won't be usable to write keys.
+
+```ruby
+Redis.new(cluster: nodes, replica: true)
+```
+
+The calling code is responsible for [avoiding cross slot commands](https://redis.io/topics/cluster-spec#keys-distribution-model).
+
+```ruby
+redis = Redis.new(cluster: %w[redis://127.0.0.1:7000])
+
+redis.mget('key1', 'key2')
+#=> Redis::CommandError (CROSSSLOT Keys in request don't hash to the same slot)
+
+redis.mget('{key}1', '{key}2')
+#=> [nil, nil]
+```
+
+* The client automatically reconnects after a failover occurred, but the caller is responsible for handling errors while it is happening.
+* The client support permanent node failures, and will reroute requests to promoted slaves.
+* The client supports `MOVED` and `ASK` redirections transparently.
+
 ## Storing objects
 
-Redis only stores strings as values. If you want to store an object, you
-can use a serialization mechanism such as JSON:
+Redis "string" types can be used to store serialized Ruby objects, for
+example with JSON:
 
 ```ruby
 require "json"
@@ -211,7 +230,7 @@ it can't connect to the server a `Redis::CannotConnectError` error will be raise
 ```ruby
 begin
   redis.ping
-rescue Exception => e
+rescue StandardError => e
   e.inspect
 # => #<Redis::CannotConnectError: Timed out connecting to Redis on 10.0.1.1:6380>
 
@@ -255,6 +274,51 @@ end
 
 If no message is received after 5 seconds, the client will unsubscribe.
 
+## Reconnections
+
+The client allows you to configure how many `reconnect_attempts` it should
+complete before declaring a connection as failed. Furthermore, you may want
+to control the maximum duration between reconnection attempts with
+`reconnect_delay` and `reconnect_delay_max`.
+
+```ruby
+Redis.new(
+  :reconnect_attempts => 10,
+  :reconnect_delay => 1.5,
+  :reconnect_delay_max => 10.0,
+)
+```
+
+The delay values are specified in seconds. With the above configuration, the
+client would attempt 10 reconnections, exponentially increasing the duration
+between each attempt but it never waits longer than `reconnect_delay_max`.
+
+This is the retry algorithm:
+
+```ruby
+attempt_wait_time = [(reconnect_delay * 2**(attempt-1)), reconnect_delay_max].min
+```
+
+**By default**, this gem will only **retry a connection once** and then fail, but with the
+above configuration the reconnection attempt would look like this:
+
+#|Attempt wait time|Total wait time
+:-:|:-:|:-:
+1|1.5s|1.5s
+2|3.0s|4.5s
+3|6.0s|10.5s
+4|10.0s|20.5s
+5|10.0s|30.5s
+6|10.0s|40.5s
+7|10.0s|50.5s
+8|10.0s|60.5s
+9|10.0s|70.5s
+10|10.0s|80.5s
+
+So if the reconnection attempt #10 succeeds 70 seconds have elapsed trying
+to reconnect, this is likely fine in long-running background processes, but if
+you use Redis to drive your website you might want to have a lower
+`reconnect_delay_max` or have less `reconnect_attempts`.
 
 ## SSL/TLS Support
 
@@ -262,7 +326,7 @@ This library supports natively terminating client side SSL/TLS connections
 when talking to Redis via a server-side proxy such as [stunnel], [hitch],
 or [ghostunnel].
 
-To enable SSL support, pass the `:ssl => :true` option when configuring the
+To enable SSL support, pass the `:ssl => true` option when configuring the
 Redis client, or pass in `:url => "rediss://..."` (like HTTPS for Redis).
 You will also need to pass in an `:ssl_params => { ... }` hash used to
 configure the `OpenSSL::SSL::SSLContext` object used for the connection:
@@ -374,37 +438,32 @@ redis = Redis.new(:driver => :synchrony)
 
 ## Testing
 
-This library is tested using [Travis][travis-home], where it is tested
-against the following interpreters and drivers:
+This library is tested against recent Ruby and Redis versions.
+Check [Travis][travis-link] for the exact versions supported.
 
-* MRI 1.8.7 (drivers: ruby, hiredis)
-* MRI 1.9.3 (drivers: ruby, hiredis, synchrony)
-* MRI 2.0 (drivers: ruby, hiredis, synchrony)
-* MRI 2.1 (drivers: ruby, hiredis, synchrony)
-* MRI 2.2 (drivers: ruby, hiredis, synchrony)
-* MRI 2.3 (drivers: ruby, hiredis, synchrony)
-* JRuby 1.7 (1.8 mode) (drivers: ruby)
-* JRuby 1.7 (1.9 mode) (drivers: ruby)
+## See Also
+
+- [async-redis](https://github.com/socketry/async-redis) — An [async](https://github.com/socketry/async) compatible Redis client.
 
 ## Contributors
 
-(ordered chronologically with more than 5 commits, see `git shortlog -sn` for
-all contributors)
-
-* Ezra Zygmuntowicz
-* Taylor Weibley
-* Matthew Clark
-* Brian McKinney
-* Luca Guidi
-* Salvatore Sanfilippo
-* Chris Wanstrath
-* Damian Janowski
-* Michel Martens
-* Nick Quaranto
-* Pieter Noordhuis
-* Ilya Grigorik
+Several people contributed to redis-rb, but we would like to especially
+mention Ezra Zygmuntowicz. Ezra introduced the Ruby community to many
+new cool technologies, like Redis. He wrote the first version of this
+client and evangelized Redis in Rubyland. Thank you, Ezra.
 
 ## Contributing
 
 [Fork the project](https://github.com/redis/redis-rb) and send pull
-requests. You can also ask for help at `#redis-rb` on Freenode.
+requests.
+
+
+[inchpages-image]: https://inch-ci.org/github/redis/redis-rb.svg
+[inchpages-link]:  https://inch-ci.org/github/redis/redis-rb
+[redis-commands]:  https://redis.io/commands
+[redis-home]:      https://redis.io
+[redis-url]:       http://www.iana.org/assignments/uri-schemes/prov/redis
+[travis-home]:     https://travis-ci.org/
+[travis-image]:    https://secure.travis-ci.org/redis/redis-rb.svg?branch=master
+[travis-link]:     https://travis-ci.org/redis/redis-rb
+[rubydoc]:         http://www.rubydoc.info/gems/redis

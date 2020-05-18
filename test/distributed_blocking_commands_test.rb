@@ -1,46 +1,52 @@
-# encoding: UTF-8
+# frozen_string_literal: true
+require_relative 'helper'
+require_relative 'lint/blocking_commands'
 
-require File.expand_path("helper", File.dirname(__FILE__))
-require "lint/blocking_commands"
-
-class TestDistributedBlockingCommands < Test::Unit::TestCase
-
+class TestDistributedBlockingCommands < Minitest::Test
   include Helper::Distributed
   include Lint::BlockingCommands
 
   def test_blpop_raises
     assert_raises(Redis::Distributed::CannotDistribute) do
-      r.blpop(["foo", "bar"])
+      r.blpop(%w[foo bar])
     end
   end
 
   def test_blpop_raises_with_old_prototype
     assert_raises(Redis::Distributed::CannotDistribute) do
-      r.blpop("foo", "bar", 0)
+      r.blpop('foo', 'bar', 0)
     end
   end
 
   def test_brpop_raises
     assert_raises(Redis::Distributed::CannotDistribute) do
-      r.brpop(["foo", "bar"])
+      r.brpop(%w[foo bar])
     end
   end
 
   def test_brpop_raises_with_old_prototype
     assert_raises(Redis::Distributed::CannotDistribute) do
-      r.brpop("foo", "bar", 0)
+      r.brpop('foo', 'bar', 0)
     end
   end
 
   def test_brpoplpush_raises
     assert_raises(Redis::Distributed::CannotDistribute) do
-      r.brpoplpush("foo", "bar")
+      r.brpoplpush('foo', 'bar')
     end
   end
 
   def test_brpoplpush_raises_with_old_prototype
     assert_raises(Redis::Distributed::CannotDistribute) do
-      r.brpoplpush("foo", "bar", 0)
+      r.brpoplpush('foo', 'bar', 0)
     end
+  end
+
+  def test_bzpopmin
+    # Not implemented yet
+  end
+
+  def test_bzpopmax
+    # Not implemented yet
   end
 end

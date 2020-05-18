@@ -1,8 +1,7 @@
-# encoding: UTF-8
+# frozen_string_literal: true
+require_relative "helper"
 
-require File.expand_path("helper", File.dirname(__FILE__))
-
-class TestErrorReplies < Test::Unit::TestCase
+class TestErrorReplies < Minitest::Test
 
   include Helper::Client
 
@@ -47,7 +46,7 @@ class TestErrorReplies < Test::Unit::TestCase
   def test_recover_from_raise_in__call_loop
     with_reconnection_check do
       begin
-        r.client.call_loop([:invalid_monitor]) do
+        r._client.call_loop([:invalid_monitor]) do
           assert false # Should never be executed
         end
       rescue => ex

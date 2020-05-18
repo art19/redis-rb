@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 # Run with
 #
 #   $ ruby -Ilib benchmarking/logging.rb
@@ -54,7 +55,7 @@ benchmark "Default options (no logger)" do
 end
 
 logging_redises.each do |redis|
-  logger = redis.client.logger
+  logger = redis._client.logger
 
   case logger
   when Logger

@@ -1,16 +1,93 @@
-# 4.x (unreleased)
+# Unreleased
 
-## Planned breaking changes:
-* `Redis#client` will no longer expose the underlying `Redis::Client`;
-  it has not yet been determined how 4.0 will expose the underlying
-  functionality, but we will make every attempt to provide a final minor
-  release of 3.x that provides the new interfaces in order to facilitate
-  a smooth transition.
+# 4.1.4
 
-* Ruby 1.8.7 (and the 1.8 modes of JRuby and Rubinius) will no longer be
-  supported; 1.8.x entered end-of-life in June of 2012 and stopped receiving
-  security updates in June of 2013; continuing to support it would prevent
-  the use of newer features of Ruby.
+* Alias `Redis#disconnect` as `#close`. See #901.
+* Handle clusters with multiple slot ranges. See #894.
+* Fix password authentication to a redis cluster. See #889.
+* Handle recursive MOVED responses. See #882.
+* Increase buffer size in the ruby connector. See #880.
+* Fix thread safety of `Redis.queue`. See #878.
+* Deprecate `Redis::Future#==` as it's likely to be a mistake. See #876.
+
+# 4.1.3
+
+* Fix the client hanging forever when connecting with SSL to a non-SSL server. See #835.
+
+# 4.1.2
+
+* Fix several authentication problems with sentinel. See #850 and #856.
+* Explicitly drop Ruby 2.2 support.
+
+
+# 4.1.1
+
+* Fix error handling in multi blocks. See #754.
+* Fix geoadd to accept arrays like georadius and georadiusbymember. See #841.
+* Fix georadius command failing when long == lat. See #841.
+* Fix timeout error in xread block: 0. See #837.
+* Fix incompatibility issue with redis-objects. See #834.
+* Properly handle Errno::EADDRNOTAVAIL on connect.
+* Fix password authentication to sentinel instances. See #813.
+
+# 4.1.0
+
+* Add Redis Cluster support. See #716.
+* Add streams support. See #799 and #811.
+* Add ZPOP* support. See #812.
+* Fix issues with integer-like objects as BPOP timeout
+
+# 4.0.3
+
+* Fix raising command error for first command in pipeline. See #788.
+* Fix the gemspec to stop exposing a `build` executable. See #785.
+* Add `:reconnect_delay` and `:reconnect_delay_max` options. See #778.
+
+# 4.0.2
+
+* Added `Redis#unlink`. See #766.
+
+* `Redis.new` now accept a custom connector via `:connector`. See #591.
+
+* `Redis#multi` no longer perform empty transactions. See #747.
+
+* `Redis#hdel` now accepts hash keys as multiple arguments like `#del`. See #755.
+
+* Allow to skip SSL verification. See #745.
+
+* Add Geo commands: `geoadd`, `geohash`, `georadius`, `georadiusbymember`, `geopos`, `geodist`. See #730.
+
+# 4.0.1
+
+* `Redis::Distributed` now supports `mget` and `mapped_mget`. See #687.
+
+* `Redis::Distributed` now supports `sscan` and `sscan_each`. See #572.
+
+* `Redis#connection` returns a hash with connection information.
+  You shouldn't need to call `Redis#_client`, ever.
+
+* `Redis#flushdb` and `Redis#flushall` now support the `:async` option. See #706.
+
+
+# 4.0
+
+* Removed `Redis.connect`. Use `Redis.new`.
+
+* Removed `Redis#[]` and `Redis#[]=` aliases.
+
+* Added support for `CLIENT` commands. The lower-level client can be
+  accessed via `Redis#_client`.
+
+* Dropped official support for Ruby < 2.2.2.
+
+# 3.3.5
+
+* Fixed Ruby 1.8 compatibility after backporting `Redis#connection`. See #719.
+
+# 3.3.4 (yanked)
+
+* `Redis#connection` returns a hash with connection information.
+  You shouldn't need to call `Redis#_client`, ever.
 
 # 3.3.3
 
@@ -18,7 +95,7 @@
 
 # 3.3.2
 
-* Added support for SPOP with COUNT. See #628.
+* Added support for `SPOP` with COUNT. See #628.
 
 * Fixed connection glitches when using SSL. See #644.
 

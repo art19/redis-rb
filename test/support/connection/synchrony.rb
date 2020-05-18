@@ -1,4 +1,5 @@
-require "support/wire/synchrony"
+# frozen_string_literal: true
+require_relative "../wire/synchrony"
 
 module Helper
   def around

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 class Redis
   module Connection
     module CommandHelper
@@ -30,14 +31,8 @@ class Redis
 
     protected
 
-      if defined?(Encoding::default_external)
-        def encode(string)
-          string.force_encoding(Encoding::default_external)
-        end
-      else
-        def encode(string)
-          string
-        end
+      def encode(string)
+        string.force_encoding(Encoding.default_external)
       end
     end
   end

@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 class Redis
-  VERSION = "3.3.3"
+  VERSION = '4.1.4'
 end

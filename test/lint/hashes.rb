@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Lint
 
   module Hashes
@@ -27,7 +28,22 @@ module Lint
 
       assert_equal 1, r.hdel("foo", "f1")
 
-      assert_equal nil, r.hget("foo", "f1")
+      assert_nil r.hget("foo", "f1")
+    end
+
+    def test_splat_hdel
+      target_version "2.3.9" do
+        r.hset("foo", "f1", "s1")
+        r.hset("foo", "f2", "s2")
+
+        assert_equal "s1", r.hget("foo", "f1")
+        assert_equal "s2", r.hget("foo", "f2")
+
+        assert_equal 2, r.hdel("foo", "f1", "f2")
+
+        assert_nil r.hget("foo", "f1")
+        assert_nil r.hget("foo", "f2")
+      end
     end
 
     def test_variadic_hdel
@@ -40,8 +56,8 @@ module Lint
 
         assert_equal 2, r.hdel("foo", ["f1", "f2"])
 
-        assert_equal nil, r.hget("foo", "f1")
-        assert_equal nil, r.hget("foo", "f2")
+        assert_nil r.hget("foo", "f1")
+        assert_nil r.hget("foo", "f2")
       end
     end
 
@@ -100,7 +116,7 @@ module Lint
     end
 
     def test_hmset_with_invalid_arguments
-      assert_raise(Redis::CommandError) do
+      assert_raises(Redis::CommandError) do
         r.hmset("hash", "foo1", "bar1", "foo2", "bar2", "foo3")
       end
     end
@@ -127,6 +143,17 @@ module Lint
 
       assert({"f1" => "s1"} == r.mapped_hmget("foo", "f1"))
       assert({"f1" => "s1", "f2" => "s2"} == r.mapped_hmget("foo", "f1", "f2"))
+    end
+
+    def test_mapped_hmget_in_a_pipeline_returns_hash
+      r.hset("foo", "f1", "s1")
+      r.hset("foo", "f2", "s2")
+
+      result = r.pipelined do
+        r.mapped_hmget("foo", "f1", "f2")
+      end
+
+      assert_equal result[0], { "f1" => "s1", "f2" => "s2" }
     end
 
     def test_hincrby
@@ -157,6 +184,21 @@ module Lint
 
         assert_equal "1.9", r.hget("foo", "f1")
       end
+    end
+
+    def test_hstrlen
+      target_version('3.2.0') do
+        redis.hmset('foo', 'f1', 'HelloWorld', 'f2', 99, 'f3', -256)
+        assert_equal 10, r.hstrlen('foo', 'f1')
+        assert_equal 2, r.hstrlen('foo', 'f2')
+        assert_equal 4, r.hstrlen('foo', 'f3')
+      end
+    end
+
+    def test_hscan
+      redis.hmset('foo', 'f1', 'Jack', 'f2', 33)
+      expected = ['0', [%w[f1 Jack], %w[f2 33]]]
+      assert_equal expected, redis.hscan('foo', 0)
     end
   end
 end

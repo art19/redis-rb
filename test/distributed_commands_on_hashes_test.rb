@@ -1,10 +1,22 @@
-# encoding: UTF-8
+# frozen_string_literal: true
+require_relative 'helper'
+require_relative 'lint/hashes'
 
-require File.expand_path("helper", File.dirname(__FILE__))
-require "lint/hashes"
-
-class TestDistributedCommandsOnHashes < Test::Unit::TestCase
-
+class TestDistributedCommandsOnHashes < Minitest::Test
   include Helper::Distributed
   include Lint::Hashes
+
+  def test_hscan
+    # Not implemented yet
+  end
+
+  def test_hstrlen
+    # Not implemented yet
+  end
+
+  def test_mapped_hmget_in_a_pipeline_returns_hash
+    assert_raises(Redis::Distributed::CannotDistribute) do
+      super
+    end
+  end
 end

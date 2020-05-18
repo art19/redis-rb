@@ -1,8 +1,7 @@
-# encoding: UTF-8
+# frozen_string_literal: true
+require_relative "helper"
 
-require File.expand_path("helper", File.dirname(__FILE__))
-
-class TestDistributedPersistenceControlCommands < Test::Unit::TestCase
+class TestDistributedPersistenceControlCommands < Minitest::Test
 
   include Helper::Distributed
 

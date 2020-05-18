@@ -1,13 +1,11 @@
-# encoding: UTF-8
+# frozen_string_literal: true
+require "em-synchrony"
+require "em-synchrony/connection_pool"
 
-require 'em-synchrony'
-require 'em-synchrony/connection_pool'
+require_relative "../lib/redis"
+require_relative "../lib/redis/connection/synchrony"
 
-require 'redis'
-require 'redis/connection/synchrony'
-
-
-require File.expand_path("./helper", File.dirname(__FILE__))
+require_relative "helper"
 
 PORT    = 6381
 OPTIONS = {:port => PORT, :db => 15}
@@ -55,7 +53,7 @@ EM.synchrony do
   assert_equal "s2", r.lpop("foo")
   assert_equal "s1", r.lpop("foo")
 
-  assert_equal "OK", r.client.call(:quit)
+  assert_equal "OK", r._client.call(:quit)
   assert_equal "PONG", r.ping
 
 
@@ -70,7 +68,7 @@ EM.synchrony do
     end
   end
 
-  assert_equal nil, result
+  assert_nil result
   assert_equal "s1", rpool.get("foo")
 
   result = rpool.watch "foo" do |rd|

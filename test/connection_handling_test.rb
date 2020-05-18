@@ -1,8 +1,7 @@
-# encoding: UTF-8
+# frozen_string_literal: true
+require_relative "helper"
 
-require File.expand_path("helper", File.dirname(__FILE__))
-
-class TestConnectionHandling < Test::Unit::TestCase
+class TestConnectionHandling < Minitest::Test
 
   include Helper::Client
 
@@ -38,17 +37,17 @@ class TestConnectionHandling < Test::Unit::TestCase
     r.set "foo", "bar"
 
     r.select 14
-    assert_equal nil, r.get("foo")
+    assert_nil r.get("foo")
 
-    r.client.disconnect
+    r._client.disconnect
 
-    assert_equal nil, r.get("foo")
+    assert_nil r.get("foo")
   end
 
   def test_quit
     r.quit
 
-    assert !r.client.connected?
+    assert !r._client.connected?
   end
 
   def test_close
@@ -112,7 +111,7 @@ class TestConnectionHandling < Test::Unit::TestCase
 
     redis_mock(commands) do |redis|
       # SHUTDOWN does not reply: test that it does not raise here.
-      assert_equal nil, redis.shutdown
+      assert_nil redis.shutdown
     end
   end
 
@@ -128,7 +127,7 @@ class TestConnectionHandling < Test::Unit::TestCase
       connections = redis.connections
 
       # SHUTDOWN replies with an error: test that it gets raised
-      assert_raise Redis::CommandError do
+      assert_raises Redis::CommandError do
         redis.shutdown
       end
 
@@ -147,8 +146,8 @@ class TestConnectionHandling < Test::Unit::TestCase
         redis.shutdown
       end
 
-      assert_equal nil, result
-      assert !redis.client.connected?
+      assert_nil result
+      assert !redis._client.connected?
     end
   end
 
@@ -164,7 +163,7 @@ class TestConnectionHandling < Test::Unit::TestCase
       connections = redis.connections
 
       # SHUTDOWN replies with an error: test that it gets raised
-      assert_raise Redis::CommandError do
+      assert_raises Redis::CommandError do
         redis.pipelined do
           redis.shutdown
         end
@@ -187,8 +186,8 @@ class TestConnectionHandling < Test::Unit::TestCase
         redis.shutdown
       end
 
-      assert_equal nil, result
-      assert !redis.client.connected?
+      assert_nil result
+      assert !redis._client.connected?
     end
   end
 

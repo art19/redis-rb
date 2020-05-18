@@ -1,16 +1,15 @@
-# encoding: UTF-8
+# frozen_string_literal: true
+require_relative "helper"
 
-require File.expand_path("helper", File.dirname(__FILE__))
-
-class TestDistributedKeyTags < Test::Unit::TestCase
+class TestDistributedKeyTags < Minitest::Test
 
   include Helper
   include Helper::Distributed
 
   def test_hashes_consistently
-    r1 = Redis::Distributed.new ["redis://localhost:#{PORT}/15", *NODES]
-    r2 = Redis::Distributed.new ["redis://localhost:#{PORT}/15", *NODES]
-    r3 = Redis::Distributed.new ["redis://localhost:#{PORT}/15", *NODES]
+    r1 = Redis::Distributed.new ["redis://127.0.0.1:#{PORT}/15", *NODES]
+    r2 = Redis::Distributed.new ["redis://127.0.0.1:#{PORT}/15", *NODES]
+    r3 = Redis::Distributed.new ["redis://127.0.0.1:#{PORT}/15", *NODES]
 
     assert_equal r1.node_for("foo").id, r2.node_for("foo").id
     assert_equal r1.node_for("foo").id, r3.node_for("foo").id

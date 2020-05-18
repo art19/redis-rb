@@ -1,21 +1,9 @@
+# frozen_string_literal: true
+
 require "monitor"
-require "redis/errors"
+require_relative "redis/errors"
 
 class Redis
-
-  def self.deprecate(message, trace = caller[0])
-    $stderr.puts "\n#{message} (in #{trace})"
-  end
-
-  attr :client
-
-  # @deprecated The preferred way to create a new client object is using `#new`.
-  #             This method does not actually establish a connection to Redis,
-  #             in contrary to what you might expect.
-  def self.connect(options = {})
-    new(options)
-  end
-
   def self.current
     @current ||= Redis.new
   end
@@ -31,24 +19,29 @@ class Redis
   # @param [Hash] options
   # @option options [String] :url (value of the environment variable REDIS_URL) a Redis URL, for a TCP connection: `redis://:[password]@[hostname]:[port]/[db]` (password, port and database are optional), for a unix socket connection: `unix://[path to Redis socket]`. This overrides all other options.
   # @option options [String] :host ("127.0.0.1") server hostname
-  # @option options [Fixnum] :port (6379) server port
+  # @option options [Integer] :port (6379) server port
   # @option options [String] :path path to server socket (overrides host and port)
   # @option options [Float] :timeout (5.0) timeout in seconds
   # @option options [Float] :connect_timeout (same as timeout) timeout for initial connect in seconds
   # @option options [String] :password Password to authenticate against server
-  # @option options [Fixnum] :db (0) Database to select after initial connect
+  # @option options [Integer] :db (0) Database to select after initial connect
   # @option options [Symbol] :driver Driver to use, currently supported: `:ruby`, `:hiredis`, `:synchrony`
   # @option options [String] :id ID for the client connection, assigns name to current connection by sending `CLIENT SETNAME`
-  # @option options [Hash, Fixnum] :tcp_keepalive Keepalive values, if Fixnum `intvl` and `probe` are calculated based on the value, if Hash `time`, `intvl` and `probes` can be specified as a Fixnum
-  # @option options [Fixnum] :reconnect_attempts Number of attempts trying to connect
+  # @option options [Hash, Integer] :tcp_keepalive Keepalive values, if Integer `intvl` and `probe` are calculated based on the value, if Hash `time`, `intvl` and `probes` can be specified as a Integer
+  # @option options [Integer] :reconnect_attempts Number of attempts trying to connect
   # @option options [Boolean] :inherit_socket (false) Whether to use socket in forked process or not
   # @option options [Array] :sentinels List of sentinels to contact
   # @option options [Symbol] :role (:master) Role to fetch via Sentinel, either `:master` or `:slave`
+  # @option options [Array<String, Hash{Symbol => String, Integer}>] :cluster List of cluster nodes to contact
+  # @option options [Boolean] :replica Whether to use readonly replica nodes in Redis Cluster or not
+  # @option options [Class] :connector Class of custom connector
   #
   # @return [Redis] a new client instance
   def initialize(options = {})
     @options = options.dup
-    @original_client = @client = Client.new(options)
+    @cluster_mode = options.key?(:cluster)
+    client = @cluster_mode ? Cluster : Client
+    @original_client = @client = client.new(options)
     @queue = Hash.new { |h, k| h[k] = [] }
 
     super() # Monitor#initialize
@@ -102,7 +95,9 @@ class Redis
   # See http://redis.io/topics/pipelining for more details.
   #
   def queue(*command)
-    @queue[Thread.current.object_id] << command
+    synchronize do
+      @queue[Thread.current.object_id] << command
+    end
   end
 
   # Sends all commands in the queue.
@@ -112,11 +107,20 @@ class Redis
   def commit
     synchronize do |client|
       begin
-        client.call_pipelined(@queue[Thread.current.object_id])
+        pipeline = Pipeline.new(client)
+        @queue[Thread.current.object_id].each do |command|
+          pipeline.call(command)
+        end
+
+        client.call_pipelined(pipeline)
       ensure
         @queue.delete(Thread.current.object_id)
       end
     end
+  end
+
+  def _client
+    @client
   end
 
   # Authenticate to the server.
@@ -132,7 +136,7 @@ class Redis
 
   # Change the selected database for the current connection.
   #
-  # @param [Fixnum] db zero-based index of the DB to use (0 to 15)
+  # @param [Integer] db zero-based index of the DB to use (0 to 15)
   # @return [String] `OK`
   def select(db)
     synchronize do |client|
@@ -143,10 +147,11 @@ class Redis
 
   # Ping the server.
   #
+  # @param [optional, String] message
   # @return [String] `PONG`
-  def ping
+  def ping(message = nil)
     synchronize do |client|
-      client.call([:ping])
+      client.call([:ping, message].compact)
     end
   end
 
@@ -209,9 +214,28 @@ class Redis
     end
   end
 
+  # Manage client connections.
+  #
+  # @param [String, Symbol] subcommand e.g. `kill`, `list`, `getname`, `setname`
+  # @return [String, Hash] depends on subcommand
+  def client(subcommand = nil, *args)
+    synchronize do |client|
+      client.call([:client, subcommand] + args) do |reply|
+        if subcommand.to_s == "list"
+          reply.lines.map do |line|
+            entries = line.chomp.split(/[ =]/)
+            Hash[entries.each_slice(2).to_a]
+          end
+        else
+          reply
+        end
+      end
+    end
+  end
+
   # Return the number of keys in the selected database.
   #
-  # @return [Fixnum]
+  # @return [Integer]
   def dbsize
     synchronize do |client|
       client.call([:dbsize])
@@ -226,19 +250,31 @@ class Redis
 
   # Remove all keys from all databases.
   #
+  # @param [Hash] options
+  #   - `:async => Boolean`: async flush (default: false)
   # @return [String] `OK`
-  def flushall
+  def flushall(options = nil)
     synchronize do |client|
-      client.call([:flushall])
+      if options && options[:async]
+        client.call([:flushall, :async])
+      else
+        client.call([:flushall])
+      end
     end
   end
 
   # Remove all keys from the current database.
   #
+  # @param [Hash] options
+  #   - `:async => Boolean`: async flush (default: false)
   # @return [String] `OK`
-  def flushdb
+  def flushdb(options = nil)
     synchronize do |client|
-      client.call([:flushdb])
+      if options && options[:async]
+        client.call([:flushdb, :async])
+      else
+        client.call([:flushdb])
+      end
     end
   end
 
@@ -250,9 +286,7 @@ class Redis
     synchronize do |client|
       client.call([:info, cmd].compact) do |reply|
         if reply.kind_of?(String)
-          reply = Hash[reply.split("\r\n").map do |line|
-            line.split(":", 2) unless line =~ /^(#|$)/
-          end.compact]
+          reply = HashifyInfo.call(reply)
 
           if cmd && cmd.to_s == "commandstats"
             # Extract nested hashes for INFO COMMANDSTATS
@@ -270,7 +304,7 @@ class Redis
 
   # Get the UNIX time stamp of the last successful save to disk.
   #
-  # @return [Fixnum]
+  # @return [Integer]
   def lastsave
     synchronize do |client|
       client.call([:lastsave])
@@ -322,8 +356,8 @@ class Redis
   # Interact with the slowlog (get, len, reset)
   #
   # @param [String] subcommand e.g. `get`, `len`, `reset`
-  # @param [Fixnum] length maximum number of entries to return
-  # @return [Array<String>, Fixnum, String] depends on subcommand
+  # @param [Integer] length maximum number of entries to return
+  # @return [Array<String>, Integer, String] depends on subcommand
   def slowlog(subcommand, length=nil)
     synchronize do |client|
       args = [:slowlog, subcommand]
@@ -344,7 +378,7 @@ class Redis
   # @example
   #   r.time # => [ 1333093196, 606806 ]
   #
-  # @return [Array<Fixnum>] tuple of seconds since UNIX epoch and
+  # @return [Array<Integer>] tuple of seconds since UNIX epoch and
   #   microseconds in the current second
   def time
     synchronize do |client|
@@ -367,7 +401,7 @@ class Redis
   # Set a key's time to live in seconds.
   #
   # @param [String] key
-  # @param [Fixnum] seconds time to live
+  # @param [Integer] seconds time to live
   # @return [Boolean] whether the timeout was set or not
   def expire(key, seconds)
     synchronize do |client|
@@ -378,7 +412,7 @@ class Redis
   # Set the expiration for a key as a UNIX timestamp.
   #
   # @param [String] key
-  # @param [Fixnum] unix_time expiry time specified as a UNIX timestamp
+  # @param [Integer] unix_time expiry time specified as a UNIX timestamp
   # @return [Boolean] whether the timeout was set or not
   def expireat(key, unix_time)
     synchronize do |client|
@@ -389,7 +423,7 @@ class Redis
   # Get the time to live (in seconds) for a key.
   #
   # @param [String] key
-  # @return [Fixnum] remaining time to live in seconds.
+  # @return [Integer] remaining time to live in seconds.
   #
   # In Redis 2.6 or older the command returns -1 if the key does not exist or if
   # the key exist but has no associated expire.
@@ -407,7 +441,7 @@ class Redis
   # Set a key's time to live in milliseconds.
   #
   # @param [String] key
-  # @param [Fixnum] milliseconds time to live
+  # @param [Integer] milliseconds time to live
   # @return [Boolean] whether the timeout was set or not
   def pexpire(key, milliseconds)
     synchronize do |client|
@@ -418,7 +452,7 @@ class Redis
   # Set the expiration for a key as number of milliseconds from UNIX Epoch.
   #
   # @param [String] key
-  # @param [Fixnum] ms_unix_time expiry time specified as number of milliseconds from UNIX Epoch.
+  # @param [Integer] ms_unix_time expiry time specified as number of milliseconds from UNIX Epoch.
   # @return [Boolean] whether the timeout was set or not
   def pexpireat(key, ms_unix_time)
     synchronize do |client|
@@ -429,7 +463,7 @@ class Redis
   # Get the time to live (in milliseconds) for a key.
   #
   # @param [String] key
-  # @return [Fixnum] remaining time to live in milliseconds
+  # @return [Integer] remaining time to live in milliseconds
   # In Redis 2.6 or older the command returns -1 if the key does not exist or if
   # the key exist but has no associated expire.
   #
@@ -458,40 +492,61 @@ class Redis
   # @param [String] key
   # @param [String] ttl
   # @param [String] serialized_value
+  # @param [Hash] options
+  #   - `:replace => Boolean`: if false, raises an error if key already exists
+  # @raise [Redis::CommandError]
   # @return [String] `"OK"`
-  def restore(key, ttl, serialized_value)
+  def restore(key, ttl, serialized_value, options = {})
+    args = [:restore, key, ttl, serialized_value]
+    args << 'REPLACE' if options[:replace]
+
     synchronize do |client|
-      client.call([:restore, key, ttl, serialized_value])
+      client.call(args)
     end
   end
 
   # Transfer a key from the connected instance to another instance.
   #
-  # @param [String] key
+  # @param [String, Array<String>] key
   # @param [Hash] options
   #   - `:host => String`: host of instance to migrate to
   #   - `:port => Integer`: port of instance to migrate to
   #   - `:db => Integer`: database to migrate to (default: same as source)
   #   - `:timeout => Integer`: timeout (default: same as connection timeout)
+  #   - `:copy => Boolean`: Do not remove the key from the local instance.
+  #   - `:replace => Boolean`: Replace existing key on the remote instance.
   # @return [String] `"OK"`
   def migrate(key, options)
-    host = options[:host] || raise(RuntimeError, ":host not specified")
-    port = options[:port] || raise(RuntimeError, ":port not specified")
-    db = (options[:db] || client.db).to_i
-    timeout = (options[:timeout] || client.timeout).to_i
+    args = [:migrate]
+    args << (options[:host] || raise(':host not specified'))
+    args << (options[:port] || raise(':port not specified'))
+    args << (key.is_a?(String) ? key : '')
+    args << (options[:db] || @client.db).to_i
+    args << (options[:timeout] || @client.timeout).to_i
+    args << 'COPY' if options[:copy]
+    args << 'REPLACE' if options[:replace]
+    args += ['KEYS', *key] if key.is_a?(Array)
 
-    synchronize do |client|
-      client.call([:migrate, host, port, key, db, timeout])
-    end
+    synchronize { |client| client.call(args) }
   end
 
   # Delete one or more keys.
   #
   # @param [String, Array<String>] keys
-  # @return [Fixnum] number of keys that were deleted
+  # @return [Integer] number of keys that were deleted
   def del(*keys)
     synchronize do |client|
       client.call([:del] + keys)
+    end
+  end
+
+  # Unlink one or more keys.
+  #
+  # @param [String, Array<String>] keys
+  # @return [Integer] number of keys that were unlinked
+  def unlink(*keys)
+    synchronize do |client|
+      client.call([:unlink] + keys)
     end
   end
 
@@ -538,7 +593,7 @@ class Redis
   #     # => "bar"
   #
   # @param [String] key
-  # @param [Fixnum] db
+  # @param [Integer] db
   # @return [Boolean] whether the key was moved or not
   def move(key, db)
     synchronize do |client|
@@ -602,7 +657,7 @@ class Redis
   #   - `:order => String`: combination of `ASC`, `DESC` and optionally `ALPHA`
   #   - `:store => String`: key to store the result at
   #
-  # @return [Array<String>, Array<Array<String>>, Fixnum]
+  # @return [Array<String>, Array<Array<String>>, Integer]
   #   - when `:get` is not specified, or holds a single element, an array of elements
   #   - when `:get` is specified, and holds more than one element, an array of
   #   elements where every element is an array with the result for every
@@ -656,7 +711,7 @@ class Redis
   #     # => 4
   #
   # @param [String] key
-  # @return [Fixnum] value after decrementing it
+  # @return [Integer] value after decrementing it
   def decr(key)
     synchronize do |client|
       client.call([:decr, key])
@@ -670,8 +725,8 @@ class Redis
   #     # => 0
   #
   # @param [String] key
-  # @param [Fixnum] decrement
-  # @return [Fixnum] value after decrementing it
+  # @param [Integer] decrement
+  # @return [Integer] value after decrementing it
   def decrby(key, decrement)
     synchronize do |client|
       client.call([:decrby, key, decrement])
@@ -685,7 +740,7 @@ class Redis
   #     # => 6
   #
   # @param [String] key
-  # @return [Fixnum] value after incrementing it
+  # @return [Integer] value after incrementing it
   def incr(key)
     synchronize do |client|
       client.call([:incr, key])
@@ -699,8 +754,8 @@ class Redis
   #     # => 10
   #
   # @param [String] key
-  # @param [Fixnum] increment
-  # @return [Fixnum] value after incrementing it
+  # @param [Integer] increment
+  # @return [Integer] value after incrementing it
   def incrby(key, increment)
     synchronize do |client|
       client.call([:incrby, key, increment])
@@ -727,8 +782,8 @@ class Redis
   # @param [String] key
   # @param [String] value
   # @param [Hash] options
-  #   - `:ex => Fixnum`: Set the specified expire time, in seconds.
-  #   - `:px => Fixnum`: Set the specified expire time, in milliseconds.
+  #   - `:ex => Integer`: Set the specified expire time, in seconds.
+  #   - `:px => Integer`: Set the specified expire time, in milliseconds.
   #   - `:nx => true`: Only set the key if it does not already exist.
   #   - `:xx => true`: Only set the key if it already exist.
   # @return [String, Boolean] `"OK"` or true, false if `:nx => true` or `:xx => true`
@@ -756,12 +811,10 @@ class Redis
     end
   end
 
-  alias :[]= :set
-
   # Set the time to live in seconds of a key.
   #
   # @param [String] key
-  # @param [Fixnum] ttl
+  # @param [Integer] ttl
   # @param [String] value
   # @return [String] `"OK"`
   def setex(key, ttl, value)
@@ -773,7 +826,7 @@ class Redis
   # Set the time to live in milliseconds of a key.
   #
   # @param [String] key
-  # @param [Fixnum] ttl
+  # @param [Integer] ttl
   # @param [String] value
   # @return [String] `"OK"`
   def psetex(key, ttl, value)
@@ -863,12 +916,10 @@ class Redis
     end
   end
 
-  alias :[] :get
-
   # Get the values of all the given keys.
   #
   # @example
-  #   redis.mget("key1", "key1")
+  #   redis.mget("key1", "key2")
   #     # => ["v1", "v2"]
   #
   # @param [Array<String>] keys
@@ -904,9 +955,9 @@ class Redis
   # Overwrite part of a string at key starting at the specified offset.
   #
   # @param [String] key
-  # @param [Fixnum] offset byte offset
+  # @param [Integer] offset byte offset
   # @param [String] value
-  # @return [Fixnum] length of the string after it was modified
+  # @return [Integer] length of the string after it was modified
   def setrange(key, offset, value)
     synchronize do |client|
       client.call([:setrange, key, offset, value.to_s])
@@ -916,10 +967,10 @@ class Redis
   # Get a substring of the string stored at a key.
   #
   # @param [String] key
-  # @param [Fixnum] start zero-based start offset
-  # @param [Fixnum] stop zero-based end offset. Use -1 for representing
+  # @param [Integer] start zero-based start offset
+  # @param [Integer] stop zero-based end offset. Use -1 for representing
   #   the end of the string
-  # @return [Fixnum] `0` or `1`
+  # @return [Integer] `0` or `1`
   def getrange(key, start, stop)
     synchronize do |client|
       client.call([:getrange, key, start, stop])
@@ -929,9 +980,9 @@ class Redis
   # Sets or clears the bit at offset in the string value stored at key.
   #
   # @param [String] key
-  # @param [Fixnum] offset bit offset
-  # @param [Fixnum] value bit value `0` or `1`
-  # @return [Fixnum] the original bit value stored at `offset`
+  # @param [Integer] offset bit offset
+  # @param [Integer] value bit value `0` or `1`
+  # @return [Integer] the original bit value stored at `offset`
   def setbit(key, offset, value)
     synchronize do |client|
       client.call([:setbit, key, offset, value])
@@ -941,8 +992,8 @@ class Redis
   # Returns the bit value at offset in the string value stored at key.
   #
   # @param [String] key
-  # @param [Fixnum] offset bit offset
-  # @return [Fixnum] `0` or `1`
+  # @param [Integer] offset bit offset
+  # @return [Integer] `0` or `1`
   def getbit(key, offset)
     synchronize do |client|
       client.call([:getbit, key, offset])
@@ -953,7 +1004,7 @@ class Redis
   #
   # @param [String] key
   # @param [String] value value to append
-  # @return [Fixnum] length of the string after appending
+  # @return [Integer] length of the string after appending
   def append(key, value)
     synchronize do |client|
       client.call([:append, key, value])
@@ -963,9 +1014,9 @@ class Redis
   # Count the number of set bits in a range of the string value stored at key.
   #
   # @param [String] key
-  # @param [Fixnum] start start index
-  # @param [Fixnum] stop stop index
-  # @return [Fixnum] the number of bits set to 1
+  # @param [Integer] start start index
+  # @param [Integer] stop stop index
+  # @return [Integer] the number of bits set to 1
   def bitcount(key, start = 0, stop = -1)
     synchronize do |client|
       client.call([:bitcount, key, start, stop])
@@ -977,7 +1028,7 @@ class Redis
   # @param [String] operation e.g. `and`, `or`, `xor`, `not`
   # @param [String] destkey destination key
   # @param [String, Array<String>] keys one or more source keys to perform `operation`
-  # @return [Fixnum] the length of the string stored in `destkey`
+  # @return [Integer] the length of the string stored in `destkey`
   def bitop(operation, destkey, *keys)
     synchronize do |client|
       client.call([:bitop, operation, destkey] + keys)
@@ -987,10 +1038,10 @@ class Redis
   # Return the position of the first bit set to 1 or 0 in a string.
   #
   # @param [String] key
-  # @param [Fixnum] bit whether to look for the first 1 or 0 bit
-  # @param [Fixnum] start start index
-  # @param [Fixnum] stop stop index
-  # @return [Fixnum] the position of the first 1/0 bit.
+  # @param [Integer] bit whether to look for the first 1 or 0 bit
+  # @param [Integer] start start index
+  # @param [Integer] stop stop index
+  # @return [Integer] the position of the first 1/0 bit.
   #                  -1 if looking for 1 and it is not found or start and stop are given.
   def bitpos(key, bit, start=nil, stop=nil)
     if stop and not start
@@ -1020,7 +1071,7 @@ class Redis
   # Get the length of the value stored in a key.
   #
   # @param [String] key
-  # @return [Fixnum] the length of the value stored in the key, or 0
+  # @return [Integer] the length of the value stored in the key, or 0
   #   if the key does not exist
   def strlen(key)
     synchronize do |client|
@@ -1031,7 +1082,7 @@ class Redis
   # Get the length of a list.
   #
   # @param [String] key
-  # @return [Fixnum]
+  # @return [Integer]
   def llen(key)
     synchronize do |client|
       client.call([:llen, key])
@@ -1041,8 +1092,8 @@ class Redis
   # Prepend one or more values to a list, creating the list if it doesn't exist
   #
   # @param [String] key
-  # @param [String, Array] value string value, or array of string values to push
-  # @return [Fixnum] the length of the list after the push operation
+  # @param [String, Array<String>] value string value, or array of string values to push
+  # @return [Integer] the length of the list after the push operation
   def lpush(key, value)
     synchronize do |client|
       client.call([:lpush, key, value])
@@ -1053,7 +1104,7 @@ class Redis
   #
   # @param [String] key
   # @param [String] value
-  # @return [Fixnum] the length of the list after the push operation
+  # @return [Integer] the length of the list after the push operation
   def lpushx(key, value)
     synchronize do |client|
       client.call([:lpushx, key, value])
@@ -1063,8 +1114,8 @@ class Redis
   # Append one or more values to a list, creating the list if it doesn't exist
   #
   # @param [String] key
-  # @param [String] value
-  # @return [Fixnum] the length of the list after the push operation
+  # @param [String, Array<String>] value string value, or array of string values to push
+  # @return [Integer] the length of the list after the push operation
   def rpush(key, value)
     synchronize do |client|
       client.call([:rpush, key, value])
@@ -1075,7 +1126,7 @@ class Redis
   #
   # @param [String] key
   # @param [String] value
-  # @return [Fixnum] the length of the list after the push operation
+  # @return [Integer] the length of the list after the push operation
   def rpushx(key, value)
     synchronize do |client|
       client.call([:rpushx, key, value])
@@ -1113,28 +1164,27 @@ class Redis
     end
   end
 
-  def _bpop(cmd, args)
-    options = {}
-
-    case args.last
-    when Hash
+  def _bpop(cmd, args, &blk)
+    timeout = if args.last.is_a?(Hash)
       options = args.pop
-    when Integer
+      options[:timeout]
+    elsif args.last.respond_to?(:to_int)
       # Issue deprecation notice in obnoxious mode...
-      options[:timeout] = args.pop
+      args.pop.to_int
     end
+
+    timeout ||= 0
 
     if args.size > 1
       # Issue deprecation notice in obnoxious mode...
     end
 
     keys = args.flatten
-    timeout = options[:timeout] || 0
 
     synchronize do |client|
       command = [cmd, keys, timeout]
       timeout += client.timeout if timeout > 0
-      client.call_with_timeout(command, timeout)
+      client.call_with_timeout(command, timeout, &blk)
     end
   end
 
@@ -1154,7 +1204,7 @@ class Redis
   # @param [String, Array<String>] keys one or more keys to perform the
   #   blocking pop on
   # @param [Hash] options
-  #   - `:timeout => Fixnum`: timeout in seconds, defaults to no timeout
+  #   - `:timeout => Integer`: timeout in seconds, defaults to no timeout
   #
   # @return [nil, [String, String]]
   #   - `nil` when the operation timed out
@@ -1168,7 +1218,7 @@ class Redis
   # @param [String, Array<String>] keys one or more keys to perform the
   #   blocking pop on
   # @param [Hash] options
-  #   - `:timeout => Fixnum`: timeout in seconds, defaults to no timeout
+  #   - `:timeout => Integer`: timeout in seconds, defaults to no timeout
   #
   # @return [nil, [String, String]]
   #   - `nil` when the operation timed out
@@ -1185,7 +1235,7 @@ class Redis
   # @param [String] source source key
   # @param [String] destination destination key
   # @param [Hash] options
-  #   - `:timeout => Fixnum`: timeout in seconds, defaults to no timeout
+  #   - `:timeout => Integer`: timeout in seconds, defaults to no timeout
   #
   # @return [nil, String]
   #   - `nil` when the operation timed out
@@ -1209,7 +1259,7 @@ class Redis
   # Get an element from a list by its index.
   #
   # @param [String] key
-  # @param [Fixnum] index
+  # @param [Integer] index
   # @return [String]
   def lindex(key, index)
     synchronize do |client|
@@ -1223,7 +1273,7 @@ class Redis
   # @param [String, Symbol] where `BEFORE` or `AFTER`
   # @param [String] pivot reference element
   # @param [String] value
-  # @return [Fixnum] length of the list after the insert operation, or `-1`
+  # @return [Integer] length of the list after the insert operation, or `-1`
   #   when the element `pivot` was not found
   def linsert(key, where, pivot, value)
     synchronize do |client|
@@ -1234,8 +1284,8 @@ class Redis
   # Get a range of elements from a list.
   #
   # @param [String] key
-  # @param [Fixnum] start start index
-  # @param [Fixnum] stop stop index
+  # @param [Integer] start start index
+  # @param [Integer] stop stop index
   # @return [Array<String>]
   def lrange(key, start, stop)
     synchronize do |client|
@@ -1246,12 +1296,12 @@ class Redis
   # Remove elements from a list.
   #
   # @param [String] key
-  # @param [Fixnum] count number of elements to remove. Use a positive
+  # @param [Integer] count number of elements to remove. Use a positive
   #   value to remove the first `count` occurrences of `value`. A negative
   #   value to remove the last `count` occurrences of `value`. Or zero, to
   #   remove all occurrences of `value` from the list.
   # @param [String] value
-  # @return [Fixnum] the number of removed elements
+  # @return [Integer] the number of removed elements
   def lrem(key, count, value)
     synchronize do |client|
       client.call([:lrem, key, count, value])
@@ -1261,7 +1311,7 @@ class Redis
   # Set the value of an element in a list by its index.
   #
   # @param [String] key
-  # @param [Fixnum] index
+  # @param [Integer] index
   # @param [String] value
   # @return [String] `OK`
   def lset(key, index, value)
@@ -1273,8 +1323,8 @@ class Redis
   # Trim a list to the specified range.
   #
   # @param [String] key
-  # @param [Fixnum] start start index
-  # @param [Fixnum] stop stop index
+  # @param [Integer] start start index
+  # @param [Integer] stop stop index
   # @return [String] `OK`
   def ltrim(key, start, stop)
     synchronize do |client|
@@ -1285,7 +1335,7 @@ class Redis
   # Get the number of members in a set.
   #
   # @param [String] key
-  # @return [Fixnum]
+  # @return [Integer]
   def scard(key)
     synchronize do |client|
       client.call([:scard, key])
@@ -1296,8 +1346,8 @@ class Redis
   #
   # @param [String] key
   # @param [String, Array<String>] member one member, or array of members
-  # @return [Boolean, Fixnum] `Boolean` when a single member is specified,
-  #   holding whether or not adding the member succeeded, or `Fixnum` when an
+  # @return [Boolean, Integer] `Boolean` when a single member is specified,
+  #   holding whether or not adding the member succeeded, or `Integer` when an
   #   array of members is specified, holding the number of members that were
   #   successfully added
   def sadd(key, member)
@@ -1318,8 +1368,8 @@ class Redis
   #
   # @param [String] key
   # @param [String, Array<String>] member one member, or array of members
-  # @return [Boolean, Fixnum] `Boolean` when a single member is specified,
-  #   holding whether or not removing the member succeeded, or `Fixnum` when an
+  # @return [Boolean, Integer] `Boolean` when a single member is specified,
+  #   holding whether or not removing the member succeeded, or `Integer` when an
   #   array of members is specified, holding the number of members that were
   #   successfully removed
   def srem(key, member)
@@ -1340,7 +1390,7 @@ class Redis
   #
   # @param [String] key
   # @return [String]
-  # @param [Fixnum] count
+  # @param [Integer] count
   def spop(key, count = nil)
     synchronize do |client|
       if count.nil?
@@ -1354,7 +1404,7 @@ class Redis
   # Get one or more random members from a set.
   #
   # @param [String] key
-  # @param [Fixnum] count
+  # @param [Integer] count
   # @return [String]
   def srandmember(key, count = nil)
     synchronize do |client|
@@ -1413,7 +1463,7 @@ class Redis
   #
   # @param [String] destination destination key
   # @param [String, Array<String>] keys keys pointing to sets to subtract
-  # @return [Fixnum] number of elements in the resulting set
+  # @return [Integer] number of elements in the resulting set
   def sdiffstore(destination, *keys)
     synchronize do |client|
       client.call([:sdiffstore, destination] + keys)
@@ -1434,7 +1484,7 @@ class Redis
   #
   # @param [String] destination destination key
   # @param [String, Array<String>] keys keys pointing to sets to intersect
-  # @return [Fixnum] number of elements in the resulting set
+  # @return [Integer] number of elements in the resulting set
   def sinterstore(destination, *keys)
     synchronize do |client|
       client.call([:sinterstore, destination] + keys)
@@ -1455,7 +1505,7 @@ class Redis
   #
   # @param [String] destination destination key
   # @param [String, Array<String>] keys keys pointing to sets to unify
-  # @return [Fixnum] number of elements in the resulting set
+  # @return [Integer] number of elements in the resulting set
   def sunionstore(destination, *keys)
     synchronize do |client|
       client.call([:sunionstore, destination] + keys)
@@ -1469,7 +1519,7 @@ class Redis
   #     # => 4
   #
   # @param [String] key
-  # @return [Fixnum]
+  # @return [Integer]
   def zcard(key)
     synchronize do |client|
       client.call([:zcard, key])
@@ -1500,10 +1550,10 @@ class Redis
   #   - `:incr => true`: When this option is specified ZADD acts like
   #   ZINCRBY; only one score-element pair can be specified in this mode
   #
-  # @return [Boolean, Fixnum, Float]
+  # @return [Boolean, Integer, Float]
   #   - `Boolean` when a single pair is specified, holding whether or not it was
   #   **added** to the sorted set.
-  #   - `Fixnum` when an array of pairs is specified, holding the number of
+  #   - `Integer` when an array of pairs is specified, holding the number of
   #   pairs that were **added** to the sorted set.
   #   - `Float` when option :incr is specified, holding the score of the member
   #   after incrementing it.
@@ -1566,10 +1616,10 @@ class Redis
   #   - a single member
   #   - an array of members
   #
-  # @return [Boolean, Fixnum]
+  # @return [Boolean, Integer]
   #   - `Boolean` when a single member is specified, holding whether or not it
   #   was removed from the sorted set
-  #   - `Fixnum` when an array of pairs is specified, holding the number of
+  #   - `Integer` when an array of pairs is specified, holding the number of
   #   members that were removed to the sorted set
   def zrem(key, member)
     synchronize do |client|
@@ -1582,6 +1632,90 @@ class Redis
           Boolify.call(reply)
         end
       end
+    end
+  end
+
+  # Removes and returns up to count members with the highest scores in the sorted set stored at key.
+  #
+  # @example Popping a member
+  #   redis.zpopmax('zset')
+  #   #=> ['b', 2.0]
+  # @example With count option
+  #   redis.zpopmax('zset', 2)
+  #   #=> [['b', 2.0], ['a', 1.0]]
+  #
+  # @params key [String] a key of the sorted set
+  # @params count [Integer] a number of members
+  #
+  # @return [Array<String, Float>] element and score pair if count is not specified
+  # @return [Array<Array<String, Float>>] list of popped elements and scores
+  def zpopmax(key, count = nil)
+    synchronize do |client|
+      members = client.call([:zpopmax, key, count].compact, &FloatifyPairs)
+      count.to_i > 1 ? members : members.first
+    end
+  end
+
+  # Removes and returns up to count members with the lowest scores in the sorted set stored at key.
+  #
+  # @example Popping a member
+  #   redis.zpopmin('zset')
+  #   #=> ['a', 1.0]
+  # @example With count option
+  #   redis.zpopmin('zset', 2)
+  #   #=> [['a', 1.0], ['b', 2.0]]
+  #
+  # @params key [String] a key of the sorted set
+  # @params count [Integer] a number of members
+  #
+  # @return [Array<String, Float>] element and score pair if count is not specified
+  # @return [Array<Array<String, Float>>] list of popped elements and scores
+  def zpopmin(key, count = nil)
+    synchronize do |client|
+      members = client.call([:zpopmin, key, count].compact, &FloatifyPairs)
+      count.to_i > 1 ? members : members.first
+    end
+  end
+
+  # Removes and returns up to count members with the highest scores in the sorted set stored at keys,
+  #   or block until one is available.
+  #
+  # @example Popping a member from a sorted set
+  #   redis.bzpopmax('zset', 1)
+  #   #=> ['zset', 'b', 2.0]
+  # @example Popping a member from multiple sorted sets
+  #   redis.bzpopmax('zset1', 'zset2', 1)
+  #   #=> ['zset1', 'b', 2.0]
+  #
+  # @params keys [Array<String>] one or multiple keys of the sorted sets
+  # @params timeout [Integer] the maximum number of seconds to block
+  #
+  # @return [Array<String, String, Float>] a touple of key, member and score
+  # @return [nil] when no element could be popped and the timeout expired
+  def bzpopmax(*args)
+    _bpop(:bzpopmax, args) do |reply|
+      reply.is_a?(Array) ? [reply[0], reply[1], Floatify.call(reply[2])] : reply
+    end
+  end
+
+  # Removes and returns up to count members with the lowest scores in the sorted set stored at keys,
+  #   or block until one is available.
+  #
+  # @example Popping a member from a sorted set
+  #   redis.bzpopmin('zset', 1)
+  #   #=> ['zset', 'a', 1.0]
+  # @example Popping a member from multiple sorted sets
+  #   redis.bzpopmin('zset1', 'zset2', 1)
+  #   #=> ['zset1', 'a', 1.0]
+  #
+  # @params keys [Array<String>] one or multiple keys of the sorted sets
+  # @params timeout [Integer] the maximum number of seconds to block
+  #
+  # @return [Array<String, String, Float>] a touple of key, member and score
+  # @return [nil] when no element could be popped and the timeout expired
+  def bzpopmin(*args)
+    _bpop(:bzpopmin, args) do |reply|
+      reply.is_a?(Array) ? [reply[0], reply[1], Floatify.call(reply[2])] : reply
     end
   end
 
@@ -1610,8 +1744,8 @@ class Redis
   #     # => [["a", 32.0], ["b", 64.0]]
   #
   # @param [String] key
-  # @param [Fixnum] start start index
-  # @param [Fixnum] stop stop index
+  # @param [Integer] start start index
+  # @param [Integer] stop stop index
   # @param [Hash] options
   #   - `:with_scores => true`: include scores in output
   #
@@ -1663,7 +1797,7 @@ class Redis
   #
   # @param [String] key
   # @param [String] member
-  # @return [Fixnum]
+  # @return [Integer]
   def zrank(key, member)
     synchronize do |client|
       client.call([:zrank, key, member])
@@ -1675,7 +1809,7 @@ class Redis
   #
   # @param [String] key
   # @param [String] member
-  # @return [Fixnum]
+  # @return [Integer]
   def zrevrank(key, member)
     synchronize do |client|
       client.call([:zrevrank, key, member])
@@ -1692,12 +1826,36 @@ class Redis
   #     # => 5
   #
   # @param [String] key
-  # @param [Fixnum] start start index
-  # @param [Fixnum] stop stop index
-  # @return [Fixnum] number of members that were removed
+  # @param [Integer] start start index
+  # @param [Integer] stop stop index
+  # @return [Integer] number of members that were removed
   def zremrangebyrank(key, start, stop)
     synchronize do |client|
       client.call([:zremrangebyrank, key, start, stop])
+    end
+  end
+
+  # Count the members, with the same score in a sorted set, within the given lexicographical range.
+  #
+  # @example Count members matching a
+  #   redis.zlexcount("zset", "[a", "[a\xff")
+  #     # => 1
+  # @example Count members matching a-z
+  #   redis.zlexcount("zset", "[a", "[z\xff")
+  #     # => 26
+  #
+  # @param [String] key
+  # @param [String] min
+  #   - inclusive minimum is specified by prefixing `(`
+  #   - exclusive minimum is specified by prefixing `[`
+  # @param [String] max
+  #   - inclusive maximum is specified by prefixing `(`
+  #   - exclusive maximum is specified by prefixing `[`
+  #
+  # @return [Integer] number of members within the specified lexicographical range
+  def zlexcount(key, min, max)
+    synchronize do |client|
+      client.call([:zlexcount, key, min, max])
     end
   end
 
@@ -1848,7 +2006,7 @@ class Redis
   # @param [String] max
   #   - inclusive maximum score is specified verbatim
   #   - exclusive maximum score is specified by prefixing `(`
-  # @return [Fixnum] number of members that were removed
+  # @return [Integer] number of members that were removed
   def zremrangebyscore(key, min, max)
     synchronize do |client|
       client.call([:zremrangebyscore, key, min, max])
@@ -1871,7 +2029,7 @@ class Redis
   # @param [String] max
   #   - inclusive maximum score is specified verbatim
   #   - exclusive maximum score is specified by prefixing `(`
-  # @return [Fixnum] number of members in within the specified range
+  # @return [Integer] number of members in within the specified range
   def zcount(key, min, max)
     synchronize do |client|
       client.call([:zcount, key, min, max])
@@ -1891,7 +2049,7 @@ class Redis
   #   - `:weights => [Float, Float, ...]`: weights to associate with source
   #   sorted sets
   #   - `:aggregate => String`: aggregate function to use (sum, min, max, ...)
-  # @return [Fixnum] number of elements in the resulting sorted set
+  # @return [Integer] number of elements in the resulting sorted set
   def zinterstore(destination, keys, options = {})
     args = []
 
@@ -1918,7 +2076,7 @@ class Redis
   #   - `:weights => [Float, Float, ...]`: weights to associate with source
   #   sorted sets
   #   - `:aggregate => String`: aggregate function to use (sum, min, max, ...)
-  # @return [Fixnum] number of elements in the resulting sorted set
+  # @return [Integer] number of elements in the resulting sorted set
   def zunionstore(destination, keys, options = {})
     args = []
 
@@ -1936,7 +2094,7 @@ class Redis
   # Get the number of fields in a hash.
   #
   # @param [String] key
-  # @return [Fixnum] number of fields in the hash
+  # @return [Integer] number of fields in the hash
   def hlen(key)
     synchronize do |client|
       client.call([:hlen, key])
@@ -2052,10 +2210,10 @@ class Redis
   #
   # @param [String] key
   # @param [String, Array<String>] field
-  # @return [Fixnum] the number of fields that were removed from the hash
-  def hdel(key, field)
+  # @return [Integer] the number of fields that were removed from the hash
+  def hdel(key, *fields)
     synchronize do |client|
-      client.call([:hdel, key, field])
+      client.call([:hdel, key, *fields])
     end
   end
 
@@ -2074,8 +2232,8 @@ class Redis
   #
   # @param [String] key
   # @param [String] field
-  # @param [Fixnum] increment
-  # @return [Fixnum] value of the field after incrementing it
+  # @param [Integer] increment
+  # @return [Integer] value of the field after incrementing it
   def hincrby(key, field, increment)
     synchronize do |client|
       client.call([:hincrby, key, field, increment])
@@ -2253,7 +2411,8 @@ class Redis
   def pipelined
     synchronize do |client|
       begin
-        original, @client = @client, Pipeline.new
+        pipeline = Pipeline.new(@client)
+        original, @client = @client, pipeline
         yield(self)
         original.call_pipeline(@client)
       ensure
@@ -2298,7 +2457,7 @@ class Redis
         client.call([:multi])
       else
         begin
-          pipeline = Pipeline::Multi.new
+          pipeline = Pipeline::Multi.new(@client)
           original, @client = @client, pipeline
           yield(self)
           original.call_pipeline(pipeline)
@@ -2642,7 +2801,7 @@ class Redis
   # union of the HyperLogLogs contained in the keys.
   #
   # @param [String, Array<String>] keys
-  # @return [Fixnum]
+  # @return [Integer]
   def pfcount(*keys)
     synchronize do |client|
       client.call([:pfcount] + keys)
@@ -2659,6 +2818,407 @@ class Redis
     synchronize do |client|
       client.call([:pfmerge, dest_key, *source_key], &BoolifySet)
     end
+  end
+
+  # Adds the specified geospatial items (latitude, longitude, name) to the specified key
+  #
+  # @param [String] key
+  # @param [Array] member arguemnts for member or members: longitude, latitude, name
+  # @return [Integer] number of elements added to the sorted set
+  def geoadd(key, *member)
+    synchronize do |client|
+      client.call([:geoadd, key, *member])
+    end
+  end
+
+  # Returns geohash string representing position for specified members of the specified key.
+  #
+  # @param [String] key
+  # @param [String, Array<String>] member one member or array of members
+  # @return [Array<String, nil>] returns array containg geohash string if member is present, nil otherwise
+  def geohash(key, member)
+    synchronize do |client|
+      client.call([:geohash, key, member])
+    end
+  end
+
+
+  # Query a sorted set representing a geospatial index to fetch members matching a
+  # given maximum distance from a point
+  #
+  # @param [Array] args key, longitude, latitude, radius, unit(m|km|ft|mi)
+  # @param ['asc', 'desc'] sort sort returned items from the nearest to the farthest or the farthest to the nearest relative to the center
+  # @param [Integer] count limit the results to the first N matching items
+  # @param ['WITHDIST', 'WITHCOORD', 'WITHHASH'] options to return additional information
+  # @return [Array<String>] may be changed with `options`
+
+  def georadius(*args, **geoptions)
+    geoarguments = _geoarguments(*args, **geoptions)
+
+    synchronize do |client|
+      client.call([:georadius, *geoarguments])
+    end
+  end
+
+  # Query a sorted set representing a geospatial index to fetch members matching a
+  # given maximum distance from an already existing member
+  #
+  # @param [Array] args key, member, radius, unit(m|km|ft|mi)
+  # @param ['asc', 'desc'] sort sort returned items from the nearest to the farthest or the farthest to the nearest relative to the center
+  # @param [Integer] count limit the results to the first N matching items
+  # @param ['WITHDIST', 'WITHCOORD', 'WITHHASH'] options to return additional information
+  # @return [Array<String>] may be changed with `options`
+
+  def georadiusbymember(*args, **geoptions)
+    geoarguments = _geoarguments(*args, **geoptions)
+
+    synchronize do |client|
+      client.call([:georadiusbymember, *geoarguments])
+    end
+  end
+
+  # Returns longitude and latitude of members of a geospatial index
+  #
+  # @param [String] key
+  # @param [String, Array<String>] member one member or array of members
+  # @return [Array<Array<String>, nil>] returns array of elements, where each element is either array of longitude and latitude or nil
+  def geopos(key, member)
+    synchronize do |client|
+      client.call([:geopos, key, member])
+    end
+  end
+
+  # Returns the distance between two members of a geospatial index
+  #
+  # @param [String ]key
+  # @param [Array<String>] members
+  # @param ['m', 'km', 'mi', 'ft'] unit
+  # @return [String, nil] returns distance in spefied unit if both members present, nil otherwise.
+  def geodist(key, member1, member2, unit = 'm')
+    synchronize do |client|
+      client.call([:geodist, key, member1, member2, unit])
+    end
+  end
+
+  # Returns the stream information each subcommand.
+  #
+  # @example stream
+  #   redis.xinfo(:stream, 'mystream')
+  # @example groups
+  #   redis.xinfo(:groups, 'mystream')
+  # @example consumers
+  #   redis.xinfo(:consumers, 'mystream', 'mygroup')
+  #
+  # @param subcommand [String] e.g. `stream` `groups` `consumers`
+  # @param key        [String] the stream key
+  # @param group      [String] the consumer group name, required if subcommand is `consumers`
+  #
+  # @return [Hash]        information of the stream if subcommand is `stream`
+  # @return [Array<Hash>] information of the consumer groups if subcommand is `groups`
+  # @return [Array<Hash>] information of the consumers if subcommand is `consumers`
+  def xinfo(subcommand, key, group = nil)
+    args = [:xinfo, subcommand, key, group].compact
+    synchronize do |client|
+      client.call(args) do |reply|
+        case subcommand.to_s.downcase
+        when 'stream'              then Hashify.call(reply)
+        when 'groups', 'consumers' then reply.map { |arr| Hashify.call(arr) }
+        else reply
+        end
+      end
+    end
+  end
+
+  # Add new entry to the stream.
+  #
+  # @example Without options
+  #   redis.xadd('mystream', f1: 'v1', f2: 'v2')
+  # @example With options
+  #   redis.xadd('mystream', { f1: 'v1', f2: 'v2' }, id: '0-0', maxlen: 1000, approximate: true)
+  #
+  # @param key   [String] the stream key
+  # @param entry [Hash]   one or multiple field-value pairs
+  # @param opts  [Hash]   several options for `XADD` command
+  #
+  # @option opts [String]  :id          the entry id, default value is `*`, it means auto generation
+  # @option opts [Integer] :maxlen      max length of entries
+  # @option opts [Boolean] :approximate whether to add `~` modifier of maxlen or not
+  #
+  # @return [String] the entry id
+  def xadd(key, entry, opts = {})
+    args = [:xadd, key]
+    args.concat(['MAXLEN', (opts[:approximate] ? '~' : nil), opts[:maxlen]].compact) if opts[:maxlen]
+    args << (opts[:id] || '*')
+    args.concat(entry.to_a.flatten)
+    synchronize { |client| client.call(args) }
+  end
+
+  # Trims older entries of the stream if needed.
+  #
+  # @example Without options
+  #   redis.xtrim('mystream', 1000)
+  # @example With options
+  #   redis.xtrim('mystream', 1000, approximate: true)
+  #
+  # @param key         [String]  the stream key
+  # @param mexlen      [Integer] max length of entries
+  # @param approximate [Boolean] whether to add `~` modifier of maxlen or not
+  #
+  # @return [Integer] the number of entries actually deleted
+  def xtrim(key, maxlen, approximate: false)
+    args = [:xtrim, key, 'MAXLEN', (approximate ? '~' : nil), maxlen].compact
+    synchronize { |client| client.call(args) }
+  end
+
+  # Delete entries by entry ids.
+  #
+  # @example With splatted entry ids
+  #   redis.xdel('mystream', '0-1', '0-2')
+  # @example With arrayed entry ids
+  #   redis.xdel('mystream', ['0-1', '0-2'])
+  #
+  # @param key [String]        the stream key
+  # @param ids [Array<String>] one or multiple entry ids
+  #
+  # @return [Integer] the number of entries actually deleted
+  def xdel(key, *ids)
+    args = [:xdel, key].concat(ids.flatten)
+    synchronize { |client| client.call(args) }
+  end
+
+  # Fetches entries of the stream in ascending order.
+  #
+  # @example Without options
+  #   redis.xrange('mystream')
+  # @example With a specific start
+  #   redis.xrange('mystream', '0-1')
+  # @example With a specific start and end
+  #   redis.xrange('mystream', '0-1', '0-3')
+  # @example With count options
+  #   redis.xrange('mystream', count: 10)
+  #
+  # @param key [String]  the stream key
+  # @param start [String]  first entry id of range, default value is `-`
+  # @param end [String]  last entry id of range, default value is `+`
+  # @param count [Integer] the number of entries as limit
+  #
+  # @return [Array<Array<String, Hash>>] the ids and entries pairs
+  def xrange(key, start = '-', _end = '+', count: nil)
+    args = [:xrange, key, start, _end]
+    args.concat(['COUNT', count]) if count
+    synchronize { |client| client.call(args, &HashifyStreamEntries) }
+  end
+
+  # Fetches entries of the stream in descending order.
+  #
+  # @example Without options
+  #   redis.xrevrange('mystream')
+  # @example With a specific end
+  #   redis.xrevrange('mystream', '0-3')
+  # @example With a specific end and start
+  #   redis.xrevrange('mystream', '0-3', '0-1')
+  # @example With count options
+  #   redis.xrevrange('mystream', count: 10)
+  #
+  # @param key [String]  the stream key
+  # @param end [String]  first entry id of range, default value is `+`
+  # @param start [String]  last entry id of range, default value is `-`
+  # @params count [Integer] the number of entries as limit
+  #
+  # @return [Array<Array<String, Hash>>] the ids and entries pairs
+  def xrevrange(key, _end = '+', start = '-', count: nil)
+    args = [:xrevrange, key, _end, start]
+    args.concat(['COUNT', count]) if count
+    synchronize { |client| client.call(args, &HashifyStreamEntries) }
+  end
+
+  # Returns the number of entries inside a stream.
+  #
+  # @example With key
+  #   redis.xlen('mystream')
+  #
+  # @param key [String] the stream key
+  #
+  # @return [Integer] the number of entries
+  def xlen(key)
+    synchronize { |client| client.call([:xlen, key]) }
+  end
+
+  # Fetches entries from one or multiple streams. Optionally blocking.
+  #
+  # @example With a key
+  #   redis.xread('mystream', '0-0')
+  # @example With multiple keys
+  #   redis.xread(%w[mystream1 mystream2], %w[0-0 0-0])
+  # @example With count option
+  #   redis.xread('mystream', '0-0', count: 2)
+  # @example With block option
+  #   redis.xread('mystream', '$', block: 1000)
+  #
+  # @param keys  [Array<String>] one or multiple stream keys
+  # @param ids   [Array<String>] one or multiple entry ids
+  # @param count [Integer]       the number of entries as limit per stream
+  # @param block [Integer]       the number of milliseconds as blocking timeout
+  #
+  # @return [Hash{String => Hash{String => Hash}}] the entries
+  def xread(keys, ids, count: nil, block: nil)
+    args = [:xread]
+    args << 'COUNT' << count if count
+    args << 'BLOCK' << block.to_i if block
+    _xread(args, keys, ids, block)
+  end
+
+  # Manages the consumer group of the stream.
+  #
+  # @example With `create` subcommand
+  #   redis.xgroup(:create, 'mystream', 'mygroup', '$')
+  # @example With `setid` subcommand
+  #   redis.xgroup(:setid, 'mystream', 'mygroup', '$')
+  # @example With `destroy` subcommand
+  #   redis.xgroup(:destroy, 'mystream', 'mygroup')
+  # @example With `delconsumer` subcommand
+  #   redis.xgroup(:delconsumer, 'mystream', 'mygroup', 'consumer1')
+  #
+  # @param subcommand     [String] `create` `setid` `destroy` `delconsumer`
+  # @param key            [String] the stream key
+  # @param group          [String] the consumer group name
+  # @param id_or_consumer [String]
+  #   * the entry id or `$`, required if subcommand is `create` or `setid`
+  #   * the consumer name, required if subcommand is `delconsumer`
+  # @param mkstream [Boolean] whether to create an empty stream automatically or not
+  #
+  # @return [String] `OK` if subcommand is `create` or `setid`
+  # @return [Integer] effected count if subcommand is `destroy` or `delconsumer`
+  def xgroup(subcommand, key, group, id_or_consumer = nil, mkstream: false)
+    args = [:xgroup, subcommand, key, group, id_or_consumer, (mkstream ? 'MKSTREAM' : nil)].compact
+    synchronize { |client| client.call(args) }
+  end
+
+  # Fetches a subset of the entries from one or multiple streams related with the consumer group.
+  # Optionally blocking.
+  #
+  # @example With a key
+  #   redis.xreadgroup('mygroup', 'consumer1', 'mystream', '>')
+  # @example With multiple keys
+  #   redis.xreadgroup('mygroup', 'consumer1', %w[mystream1 mystream2], %w[> >])
+  # @example With count option
+  #   redis.xreadgroup('mygroup', 'consumer1', 'mystream', '>', count: 2)
+  # @example With block option
+  #   redis.xreadgroup('mygroup', 'consumer1', 'mystream', '>', block: 1000)
+  # @example With noack option
+  #   redis.xreadgroup('mygroup', 'consumer1', 'mystream', '>', noack: true)
+  #
+  # @param group    [String]        the consumer group name
+  # @param consumer [String]        the consumer name
+  # @param keys     [Array<String>] one or multiple stream keys
+  # @param ids      [Array<String>] one or multiple entry ids
+  # @param opts     [Hash]          several options for `XREADGROUP` command
+  #
+  # @option opts [Integer] :count the number of entries as limit
+  # @option opts [Integer] :block the number of milliseconds as blocking timeout
+  # @option opts [Boolean] :noack whether message loss is acceptable or not
+  #
+  # @return [Hash{String => Hash{String => Hash}}] the entries
+  def xreadgroup(group, consumer, keys, ids, opts = {})
+    args = [:xreadgroup, 'GROUP', group, consumer]
+    args << 'COUNT' << opts[:count] if opts[:count]
+    args << 'BLOCK' << opts[:block].to_i if opts[:block]
+    args << 'NOACK' if opts[:noack]
+    _xread(args, keys, ids, opts[:block])
+  end
+
+  # Removes one or multiple entries from the pending entries list of a stream consumer group.
+  #
+  # @example With a entry id
+  #   redis.xack('mystream', 'mygroup', '1526569495631-0')
+  # @example With splatted entry ids
+  #   redis.xack('mystream', 'mygroup', '0-1', '0-2')
+  # @example With arrayed entry ids
+  #   redis.xack('mystream', 'mygroup', %w[0-1 0-2])
+  #
+  # @param key   [String]        the stream key
+  # @param group [String]        the consumer group name
+  # @param ids   [Array<String>] one or multiple entry ids
+  #
+  # @return [Integer] the number of entries successfully acknowledged
+  def xack(key, group, *ids)
+    args = [:xack, key, group].concat(ids.flatten)
+    synchronize { |client| client.call(args) }
+  end
+
+  # Changes the ownership of a pending entry
+  #
+  # @example With splatted entry ids
+  #   redis.xclaim('mystream', 'mygroup', 'consumer1', 3600000, '0-1', '0-2')
+  # @example With arrayed entry ids
+  #   redis.xclaim('mystream', 'mygroup', 'consumer1', 3600000, %w[0-1 0-2])
+  # @example With idle option
+  #   redis.xclaim('mystream', 'mygroup', 'consumer1', 3600000, %w[0-1 0-2], idle: 1000)
+  # @example With time option
+  #   redis.xclaim('mystream', 'mygroup', 'consumer1', 3600000, %w[0-1 0-2], time: 1542866959000)
+  # @example With retrycount option
+  #   redis.xclaim('mystream', 'mygroup', 'consumer1', 3600000, %w[0-1 0-2], retrycount: 10)
+  # @example With force option
+  #   redis.xclaim('mystream', 'mygroup', 'consumer1', 3600000, %w[0-1 0-2], force: true)
+  # @example With justid option
+  #   redis.xclaim('mystream', 'mygroup', 'consumer1', 3600000, %w[0-1 0-2], justid: true)
+  #
+  # @param key           [String]        the stream key
+  # @param group         [String]        the consumer group name
+  # @param consumer      [String]        the consumer name
+  # @param min_idle_time [Integer]       the number of milliseconds
+  # @param ids           [Array<String>] one or multiple entry ids
+  # @param opts          [Hash]          several options for `XCLAIM` command
+  #
+  # @option opts [Integer] :idle       the number of milliseconds as last time it was delivered of the entry
+  # @option opts [Integer] :time       the number of milliseconds as a specific Unix Epoch time
+  # @option opts [Integer] :retrycount the number of retry counter
+  # @option opts [Boolean] :force      whether to create the pending entry to the pending entries list or not
+  # @option opts [Boolean] :justid     whether to fetch just an array of entry ids or not
+  #
+  # @return [Hash{String => Hash}] the entries successfully claimed
+  # @return [Array<String>]        the entry ids successfully claimed if justid option is `true`
+  def xclaim(key, group, consumer, min_idle_time, *ids, **opts)
+    args = [:xclaim, key, group, consumer, min_idle_time].concat(ids.flatten)
+    args.concat(['IDLE',       opts[:idle].to_i])  if opts[:idle]
+    args.concat(['TIME',       opts[:time].to_i])  if opts[:time]
+    args.concat(['RETRYCOUNT', opts[:retrycount]]) if opts[:retrycount]
+    args << 'FORCE'                                if opts[:force]
+    args << 'JUSTID'                               if opts[:justid]
+    blk = opts[:justid] ? Noop : HashifyStreamEntries
+    synchronize { |client| client.call(args, &blk) }
+  end
+
+  # Fetches not acknowledging pending entries
+  #
+  # @example With key and group
+  #   redis.xpending('mystream', 'mygroup')
+  # @example With range options
+  #   redis.xpending('mystream', 'mygroup', '-', '+', 10)
+  # @example With range and consumer options
+  #   redis.xpending('mystream', 'mygroup', '-', '+', 10, 'consumer1')
+  #
+  # @param key      [String]  the stream key
+  # @param group    [String]  the consumer group name
+  # @param start    [String]  start first entry id of range
+  # @param end      [String]  end   last entry id of range
+  # @param count    [Integer] count the number of entries as limit
+  # @param consumer [String]  the consumer name
+  #
+  # @return [Hash]        the summary of pending entries
+  # @return [Array<Hash>] the pending entries details if options were specified
+  def xpending(key, group, *args)
+    command_args = [:xpending, key, group]
+    case args.size
+    when 0, 3, 4
+      command_args.concat(args)
+    else
+      raise ArgumentError, "wrong number of arguments (given #{args.size + 2}, expected 2, 5 or 6)"
+    end
+
+    summary_needed = args.empty?
+    blk = summary_needed ? HashifyStreamPendings : HashifyStreamPendingDetails
+    synchronize { |client| client.call(command_args, &blk) }
   end
 
   # Interact with the sentinel command (masters, master, slaves, failover)
@@ -2688,6 +3248,41 @@ class Redis
     end
   end
 
+  # Sends `CLUSTER *` command to random node and returns its reply.
+  #
+  # @see https://redis.io/commands#cluster Reference of cluster command
+  #
+  # @param subcommand [String, Symbol] the subcommand of cluster command
+  #   e.g. `:slots`, `:nodes`, `:slaves`, `:info`
+  #
+  # @return [Object] depends on the subcommand
+  def cluster(subcommand, *args)
+    subcommand = subcommand.to_s.downcase
+    block = case subcommand
+            when 'slots'  then HashifyClusterSlots
+            when 'nodes'  then HashifyClusterNodes
+            when 'slaves' then HashifyClusterSlaves
+            when 'info'   then HashifyInfo
+            else Noop
+            end
+
+    # @see https://github.com/antirez/redis/blob/unstable/src/redis-trib.rb#L127 raw reply expected
+    block = Noop unless @cluster_mode
+
+    synchronize do |client|
+      client.call([:cluster, subcommand] + args, &block)
+    end
+  end
+
+  # Sends `ASKING` command to random node and returns its reply.
+  #
+  # @see https://redis.io/topics/cluster-spec#ask-redirection ASK redirection
+  #
+  # @return [String] `'OK'`
+  def asking
+    synchronize { |client| client.call(%i[asking]) }
+  end
+
   def id
     @original_client.id
   end
@@ -2698,6 +3293,18 @@ class Redis
 
   def dup
     self.class.new(@options)
+  end
+
+  def connection
+    return @original_client.connection_info if @cluster_mode
+
+    {
+      host:     @original_client.host,
+      port:     @original_client.port,
+      db:       @original_client.db,
+      id:       @original_client.id,
+      location: @original_client.location
+    }
   end
 
   def method_missing(command, *args)
@@ -2711,48 +3318,144 @@ private
   # Commands returning 1 for true and 0 for false may be executed in a pipeline
   # where the method call will return nil. Propagate the nil instead of falsely
   # returning false.
-  Boolify =
-    lambda { |value|
-      value == 1 if value
-    }
+  Boolify = lambda { |value|
+    case value
+    when 1
+      true
+    when 0
+      false
+    else
+      value
+    end
+  }
 
-  BoolifySet =
-    lambda { |value|
-      if value && "OK" == value
-        true
-      else
-        false
-      end
-    }
+  BoolifySet = lambda { |value|
+    case value
+    when "OK"
+      true
+    when nil
+      false
+    else
+      value
+    end
+  }
 
-  Hashify =
-    lambda { |array|
-      hash = Hash.new
-      array.each_slice(2) do |field, value|
-        hash[field] = value
-      end
-      hash
-    }
+  Hashify = lambda { |value|
+    if value.respond_to?(:each_slice)
+      value.each_slice(2).to_h
+    else
+      value
+    end
+  }
 
-  Floatify =
-    lambda { |str|
-      if str
-        if (inf = str.match(/^(-)?inf/i))
-          (inf[1] ? -1.0 : 1.0) / 0.0
-        else
-          Float(str)
-        end
-      end
-    }
+  Floatify = lambda { |value|
+    case value
+    when "inf"
+      Float::INFINITY
+    when "-inf"
+      -Float::INFINITY
+    when String
+      Float(value)
+    else
+      value
+    end
+  }
 
-  FloatifyPairs =
-    lambda { |array|
-      if array
-        array.each_slice(2).map do |member, score|
-          [member, Floatify.call(score)]
-        end
-      end
+  FloatifyPairs = lambda { |value|
+    return value unless value.respond_to?(:each_slice)
+
+    value.each_slice(2).map do |member, score|
+      [member, Floatify.call(score)]
+    end
+  }
+
+  HashifyInfo = lambda { |reply|
+    lines = reply.split("\r\n").grep_v(/^(#|$)/)
+    lines.map! { |line| line.split(':', 2) }
+    lines.compact!
+    lines.to_h
+  }
+
+  HashifyStreams = lambda { |reply|
+    case reply
+    when nil
+      {}
+    else
+      reply.map { |key, entries| [key, HashifyStreamEntries.call(entries)] }.to_h
+    end
+  }
+
+  HashifyStreamEntries = lambda { |reply|
+    reply.map do |entry_id, values|
+      [entry_id, values.each_slice(2).to_h]
+    end
+  }
+
+  HashifyStreamPendings = lambda { |reply|
+    {
+      'size'         => reply[0],
+      'min_entry_id' => reply[1],
+      'max_entry_id' => reply[2],
+      'consumers'    => reply[3].nil? ? {} : reply[3].to_h
     }
+  }
+
+  HashifyStreamPendingDetails = lambda { |reply|
+    reply.map do |arr|
+      {
+        'entry_id' => arr[0],
+        'consumer' => arr[1],
+        'elapsed'  => arr[2],
+        'count'    => arr[3]
+      }
+    end
+  }
+
+  HashifyClusterNodeInfo = lambda { |str|
+    arr = str.split(' ')
+    {
+      'node_id'        => arr[0],
+      'ip_port'        => arr[1],
+      'flags'          => arr[2].split(','),
+      'master_node_id' => arr[3],
+      'ping_sent'      => arr[4],
+      'pong_recv'      => arr[5],
+      'config_epoch'   => arr[6],
+      'link_state'     => arr[7],
+      'slots'          => arr[8].nil? ? nil : Range.new(*arr[8].split('-'))
+    }
+  }
+
+  HashifyClusterSlots = lambda { |reply|
+    reply.map do |arr|
+      first_slot, last_slot = arr[0..1]
+      master = { 'ip' => arr[2][0], 'port' => arr[2][1], 'node_id' => arr[2][2] }
+      replicas = arr[3..-1].map { |r| { 'ip' => r[0], 'port' => r[1], 'node_id' => r[2] } }
+      {
+        'start_slot' => first_slot,
+        'end_slot'   => last_slot,
+        'master'     => master,
+        'replicas'   => replicas
+      }
+    end
+  }
+
+  HashifyClusterNodes = lambda { |reply|
+    reply.split(/[\r\n]+/).map { |str| HashifyClusterNodeInfo.call(str) }
+  }
+
+  HashifyClusterSlaves = lambda { |reply|
+    reply.map { |str| HashifyClusterNodeInfo.call(str) }
+  }
+
+  Noop = ->(reply) { reply }
+
+  def _geoarguments(*args, options: nil, sort: nil, count: nil)
+    args.push sort if sort
+    args.push 'count', count if count
+    args.push options if options
+    args
+  end
 
   def _subscription(method, timeout, channels, block)
     return @client.call([method] + channels) if subscribed?
@@ -2769,10 +3472,29 @@ private
     end
   end
 
+  def _xread(args, keys, ids, blocking_timeout_msec)
+    keys = keys.is_a?(Array) ? keys : [keys]
+    ids = ids.is_a?(Array) ? ids : [ids]
+    args << 'STREAMS'
+    args.concat(keys)
+    args.concat(ids)
+
+    synchronize do |client|
+      if blocking_timeout_msec.nil?
+        client.call(args, &HashifyStreams)
+      elsif blocking_timeout_msec.to_f.zero?
+        client.call_without_timeout(args, &HashifyStreams)
+      else
+        timeout = client.timeout.to_f + blocking_timeout_msec.to_f / 1000.0
+        client.call_with_timeout(args, timeout, &HashifyStreams)
+      end
+    end
+  end
 end
 
-require "redis/version"
-require "redis/connection"
-require "redis/client"
-require "redis/pipeline"
-require "redis/subscribe"
+require_relative "redis/version"
+require_relative "redis/connection"
+require_relative "redis/client"
+require_relative "redis/cluster"
+require_relative "redis/pipeline"
+require_relative "redis/subscribe"
