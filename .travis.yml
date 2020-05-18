@@ -9,7 +9,7 @@ before_install:
 script: make
 
 rvm:
-  - 2.6
+  - 2.6.2
   - 2.7.1
   - jruby-9.1.17.0
   - jruby-9.1.15.0
